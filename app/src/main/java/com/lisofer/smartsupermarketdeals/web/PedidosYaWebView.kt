@@ -100,7 +100,8 @@ private const val captureScript = """
     } catch (_) {}
   };
 
-  const moneyPattern = /\$\s*[\d][\d.,]*/;
+  const moneySource = '\\' + String.fromCharCode(36) + '\\s*[\\d][\\d.,]*';
+  const moneyPattern = new RegExp(moneySource);
   const promoPattern = /(\d{1,2}\s*%|promo|oferta|descuento|ahorr|2\s*x\s*1|3\s*x\s*2|segunda\s+unidad)/i;
   const ignoredLinePattern = /^(agregar|sumar|ver más|envío|delivery|cerrar|buscar|inicio|categorías?)$/i;
 
@@ -131,7 +132,7 @@ private const val captureScript = """
     let node = priceElement;
     for (let depth = 0; depth < 7 && node; depth += 1, node = node.parentElement) {
       const text = textOf(node);
-      const prices = text.match(/\$\s*[\d][\d.,]*/g) || [];
+      const prices = text.match(new RegExp(moneySource, 'g')) || [];
       if (text.length >= 8 && text.length <= 650 && prices.length >= 1 && prices.length <= 5) {
         return node;
       }
