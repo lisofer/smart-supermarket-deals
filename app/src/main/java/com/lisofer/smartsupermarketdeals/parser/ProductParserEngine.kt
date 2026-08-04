@@ -77,7 +77,9 @@ internal class ProductParserEngine(private val sourceUrl: String) {
 
         // PedidosYa often separates the mechanic (SECOND_UNIT) from its numeric value.
         // Reconstruct that product-wide context before accepting an isolated 50 as 50% direct.
-        val reconstructedSecond = SecondUnitPromotionResolver.fromProductSubtree(json)
+        val reconstructedSecond =
+            SecondUnitPromotionResolver.fromProductSubtree(json)
+                ?: SplitSecondUnitTextResolver.fromProductSubtree(json)
         val deepPromotion = PromotionInterpreter.fromProductSubtree(json)
         val promotion = when {
             reconstructedSecond != null -> reconstructedSecond
