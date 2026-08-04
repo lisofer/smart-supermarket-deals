@@ -175,7 +175,7 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                     product.effectiveDiscountPercent > 0.0 &&
                     product.promotionKind != null
             }
-            .groupBy { it.key }
+            .groupBy { "${it.key}|${it.promotionCategory}" }
             .mapNotNull { (_, versions) ->
                 versions.maxWithOrNull(
                     compareBy<CapturedProduct> { it.effectiveDiscountPercent ?: 0.0 }
@@ -217,7 +217,7 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         }
     }
 
-    fun promotionGroups(maxPerCategory: Int = 20): List<PromotionGroup> {
+    fun promotionGroups(): List<PromotionGroup> {
         val deals = mutableListOf<PromotionDeal>()
         readableDatabase.rawQuery(
             """
@@ -257,13 +257,11 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             .distinctBy { "${it.storeName}|${it.productKey}|${it.categoryKey}" }
             .groupBy { it.categoryKey }
             .map { (key, categoryDeals) ->
-                val ordered = categoryDeals
-                    .sortedWith(
-                        compareByDescending<PromotionDeal> { it.effectiveDiscountPercent }
-                            .thenBy { it.currentPrice }
-                            .thenBy { it.productName }
-                    )
-                    .take(maxPerCategory.coerceAtLeast(1))
+                val ordered = categoryDeals.sortedWith(
+                    compareByDescending<PromotionDeal> { it.effectiveDiscountPercent }
+                        .thenBy { it.currentPrice }
+                        .thenBy { it.productName }
+                )
                 PromotionGroup(
                     key = key,
                     title = ordered.first().categoryTitle,
