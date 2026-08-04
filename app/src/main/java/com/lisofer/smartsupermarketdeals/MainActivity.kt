@@ -14,10 +14,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -38,9 +40,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.lisofer.smartsupermarketdeals.data.CapturedProduct
-import com.lisofer.smartsupermarketdeals.data.Deal
-import com.lisofer.smartsupermarketdeals.data.DealEvidence
 import com.lisofer.smartsupermarketdeals.data.DealsDatabase
+import com.lisofer.smartsupermarketdeals.data.PromotionDeal
+import com.lisofer.smartsupermarketdeals.data.PromotionGroup
+import com.lisofer.smartsupermarketdeals.data.PromotionKind
 import com.lisofer.smartsupermarketdeals.data.Store
 import com.lisofer.smartsupermarketdeals.parser.ProductJsonExtractor
 import com.lisofer.smartsupermarketdeals.web.PedidosYaWebView
@@ -50,6 +53,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.NumberFormat
 import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 private const val PEDIDOSYA_HOME = "https://www.pedidosya.com.ar/"
 
@@ -73,14 +78,14 @@ private fun SmartDealsApp(database: DealsDatabase) {
     val scope = rememberCoroutineScope()
     var screen by remember { mutableStateOf(Screen.HOME) }
     var stores by remember { mutableStateOf(emptyList<Store>()) }
-    var deals by remember { mutableStateOf(emptyList<Deal>()) }
+    var promotionGroups by remember { mutableStateOf(emptyList<PromotionGroup>()) }
 
     suspend fun refresh() {
         val snapshot = withContext(Dispatchers.IO) {
-            database.stores() to database.topDeals()
+            database.stores() to database.promotionGroups(maxPerCategory = 20)
         }
         stores = snapshot.first
-        deals = snapshot.second
+        promotionGroups = snapshot.second
     }
 
     LaunchedEffect(Unit) { refresh() }
@@ -88,7 +93,7 @@ private fun SmartDealsApp(database: DealsDatabase) {
     when (screen) {
         Screen.HOME -> HomeScreen(
             stores = stores,
-            deals = deals,
+            promotionGroups = promotionGroups,
             onAddStore = { screen = Screen.ADD_STORE },
             onAnalyze = { screen = Screen.SCAN },
             onDeleteStore = { store ->
@@ -127,11 +132,17 @@ private fun SmartDealsApp(database: DealsDatabase) {
 @Composable
 private fun HomeScreen(
     stores: List<Store>,
-    deals: List<Deal>,
+    promotionGroups: List<PromotionGroup>,
     onAddStore: () -> Unit,
     onAnalyze: () -> Unit,
     onDeleteStore: (Store) -> Unit,
 ) {
+    var selectedCategory by remember(promotionGroups) {
+        mutableStateOf(promotionGroups.firstOrNull()?.key)
+    }
+    val selectedGroup = promotionGroups.firstOrNull { it.key == selectedCategory }
+        ?: promotionGroups.firstOrNull()
+
     Scaffold { padding ->
         LazyColumn(
             modifier = Modifier
@@ -148,7 +159,7 @@ private fun HomeScreen(
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    text = "Promociones publicadas e historial local · Top 30",
+                    text = "Promociones publicadas · hasta 20 productos por filtro",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
@@ -163,7 +174,7 @@ private fun HomeScreen(
                         enabled = stores.isNotEmpty(),
                         onClick = onAnalyze,
                     ) {
-                        Text("Analizar ahora")
+                        Text("Buscar descuentos")
                     }
                     OutlinedButton(
                         modifier = Modifier.weight(1f),
@@ -210,18 +221,60 @@ private fun HomeScreen(
 
             item {
                 HorizontalDivider()
-                Text("Mejores oportunidades", fontWeight = FontWeight.SemiBold)
+                Text("Descuentos encontrados", fontWeight = FontWeight.SemiBold)
             }
 
-            if (deals.isEmpty()) {
+            if (promotionGroups.isEmpty()) {
                 item {
                     InfoCard(
-                        "Todavía no se pudo leer el catálogo. La próxima versión de captura " +
-                            "revisa tanto los datos internos como los productos visibles en pantalla."
+                        "Todavía no hay promociones cuantificables. La búsqueda muestra solamente " +
+                            "descuentos publicados: porcentajes, 2x1, 3x2 y segunda unidad."
                     )
                 }
             } else {
-                items(deals) { deal -> DealCard(deal) }
+                item {
+                    Text(
+                        "Se abrió automáticamente el filtro con mayor ahorro efectivo.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                item {
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        items(promotionGroups, key = { it.key }) { group ->
+                            FilterChip(
+                                selected = group.key == selectedGroup?.key,
+                                onClick = { selectedCategory = group.key },
+                                label = {
+                                    Text("${group.title} (${group.products.size})")
+                                },
+                            )
+                        }
+                    }
+                }
+                selectedGroup?.let { group ->
+                    item {
+                        Column {
+                            Text(
+                                group.title,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            Text(
+                                "Ahorro efectivo aproximado: " +
+                                    "${formatPercent(group.effectiveDiscountPercent)}%",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                    }
+                    items(
+                        items = group.products,
+                        key = { deal ->
+                            "${deal.storeName}|${deal.productKey}|${deal.categoryKey}"
+                        },
+                    ) { deal ->
+                        PromotionCard(deal)
+                    }
+                }
             }
             item { Spacer(Modifier.height(24.dp)) }
         }
@@ -252,7 +305,7 @@ private fun AddStoreScreen(
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 if (capturedCount > 0) {
-                    Text("Productos detectados durante la prueba: $capturedCount")
+                    Text("Lecturas de productos detectadas: $capturedCount")
                 }
                 if (unsupported) {
                     Text(
@@ -301,9 +354,11 @@ private fun ScanScreen(
 
     val scope = rememberCoroutineScope()
     var index by remember { mutableIntStateOf(0) }
-    var pageFinishedToken by remember { mutableIntStateOf(0) }
+    var pageFinishedToken by remember(index) { mutableIntStateOf(0) }
+    var explorationComplete by remember(index) { mutableStateOf(false) }
+    var saved by remember(index) { mutableStateOf(false) }
     var unsupported by remember { mutableStateOf(false) }
-    var status by remember { mutableStateOf("Abriendo tienda…") }
+    var status by remember(index) { mutableStateOf("Abriendo tienda…") }
     val products = remember(index) { mutableStateMapOf<String, CapturedProduct>() }
     val store = stores[index]
 
@@ -312,29 +367,34 @@ private fun ScanScreen(
         activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
-    LaunchedEffect(index, pageFinishedToken, products.size) {
-        if (pageFinishedToken == 0) return@LaunchedEffect
-        val promoCount = products.values.count { product ->
-            product.originalPrice != null ||
-                product.advertisedDiscountPercent != null ||
-                product.promoLabel != null
-        }
-        status = if (products.isEmpty()) {
-            "Esperando el catálogo y leyendo la pantalla…"
-        } else {
-            "${products.size} productos · $promoCount con señal promocional"
-        }
-        delay(if (products.isEmpty()) 24_000 else 6_000)
+    suspend fun finishCurrentStore() {
+        if (saved) return
+        saved = true
+        val promotionCount = products.values.count { it.effectiveDiscountPercent != null }
+        status = "Guardando $promotionCount promociones…"
         val snapshot = products.values.toList()
         withContext(Dispatchers.IO) { database.saveScan(store.id, snapshot) }
+
         if (index == stores.lastIndex) {
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             onFinished()
         } else {
             index += 1
-            pageFinishedToken = 0
-            status = "Abriendo siguiente tienda…"
         }
+    }
+
+    LaunchedEffect(index, pageFinishedToken) {
+        if (pageFinishedToken == 0) return@LaunchedEffect
+        // Safety timeout in case the website blocks the completion event.
+        delay(55_000)
+        finishCurrentStore()
+    }
+
+    LaunchedEffect(index, explorationComplete) {
+        if (!explorationComplete) return@LaunchedEffect
+        status = "Terminando de reunir promociones…"
+        delay(1_500)
+        finishCurrentStore()
     }
 
     Scaffold { padding ->
@@ -345,7 +405,7 @@ private fun ScanScreen(
         ) {
             Column(modifier = Modifier.padding(14.dp)) {
                 Text(
-                    "Analizando ${index + 1}/${stores.size}: ${store.name}",
+                    "Buscando ${index + 1}/${stores.size}: ${store.name}",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                 )
@@ -358,8 +418,8 @@ private fun ScanScreen(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(status)
                         Text(
-                            "No busca solamente la palabra promo: revisa precio anterior, " +
-                                "porcentaje, etiquetas y cambios contra tu historial.",
+                            "La app recorre el catálogo completo y conserva la lectura más " +
+                                "detallada de cada producto.",
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -388,12 +448,32 @@ private fun ScanScreen(
                     .weight(1f),
                 url = store.url,
                 freshLoad = true,
+                autoExplore = true,
                 onJsonPayload = { payload ->
-                    ProductJsonExtractor.extract(payload).forEach { product ->
-                        products[product.key] = product
+                    ProductJsonExtractor.extract(payload).forEach { incoming ->
+                        products[incoming.key] = ProductJsonExtractor.prefer(
+                            products[incoming.key],
+                            incoming,
+                        )
                     }
+                    val promoCount = products.values.count {
+                        it.effectiveDiscountPercent != null
+                    }
+                    status = "${products.size} productos · $promoCount promociones"
                 },
-                onPageFinished = { pageFinishedToken += 1 },
+                onPageFinished = {
+                    pageFinishedToken += 1
+                    status = "Preparando recorrido automático…"
+                },
+                onExplorationProgress = { step ->
+                    val promoCount = products.values.count {
+                        it.effectiveDiscountPercent != null
+                    }
+                    status = "Recorriendo catálogo: paso $step · $promoCount promociones"
+                },
+                onExplorationFinished = {
+                    explorationComplete = true
+                },
                 onUnsupportedWebView = { unsupported = true },
             )
         }
@@ -401,7 +481,7 @@ private fun ScanScreen(
 }
 
 @Composable
-private fun DealCard(deal: Deal) {
+private fun PromotionCard(deal: PromotionDeal) {
     val formatter = remember { NumberFormat.getCurrencyInstance(Locale("es", "AR")) }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(14.dp)) {
@@ -414,32 +494,32 @@ private fun DealCard(deal: Deal) {
                 Text(formatter.format(deal.currentPrice), fontWeight = FontWeight.Bold)
             }
             Text(deal.storeName, style = MaterialTheme.typography.bodySmall)
-            deal.promoLabel?.takeIf { it.isNotBlank() }?.let { label ->
-                Text(label, color = MaterialTheme.colorScheme.primary)
-            }
-
-            val reference = deal.referencePrice
-            if (reference != null && deal.discountPercent > 0.0) {
-                val sourceText = when (deal.evidence) {
-                    DealEvidence.HISTORICAL -> "vs. tu historial"
-                    DealEvidence.ADVERTISED -> "según precio publicado"
-                    DealEvidence.BOTH -> "confirmado por precio publicado e historial"
-                    DealEvidence.BASELINE -> ""
+            Text(
+                deal.categoryTitle,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.SemiBold,
+            )
+            deal.promoLabel
+                ?.takeIf { it.isNotBlank() && !it.equals(deal.categoryTitle, ignoreCase = true) }
+                ?.let { label ->
+                    Text(label, style = MaterialTheme.typography.bodySmall, maxLines = 2)
                 }
+
+            val explanation = when (deal.promotionKind) {
+                PromotionKind.DIRECT_PERCENT ->
+                    "Descuento directo: ${formatPercent(deal.effectiveDiscountPercent)}%"
+                PromotionKind.MULTIBUY ->
+                    "Ahorro efectivo: ${formatPercent(deal.effectiveDiscountPercent)}% " +
+                        "cumpliendo la cantidad de la promoción"
+                PromotionKind.SECOND_UNIT ->
+                    "Ahorro efectivo: ${formatPercent(deal.effectiveDiscountPercent)}% " +
+                        "sobre dos unidades"
+            }
+            Text(explanation, style = MaterialTheme.typography.bodySmall)
+
+            deal.originalPrice?.takeIf { it > deal.currentPrice }?.let { original ->
                 Text(
-                    "${deal.discountPercent.toInt()}% debajo de ${formatter.format(reference)}" +
-                        if (sourceText.isNotBlank()) " · $sourceText" else "" +
-                        if (deal.isHistoricalMinimum) " · mínimo registrado" else "",
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            } else if (deal.evidence == DealEvidence.ADVERTISED) {
-                Text(
-                    "Tiene señal promocional, pero PedidosYa no expuso un precio comparable.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            } else {
-                Text(
-                    "Precio base guardado; se vuelve comparable en la próxima medición.",
+                    "Precio anterior publicado: ${formatter.format(original)}",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -453,6 +533,14 @@ private fun InfoCard(text: String) {
         Box(modifier = Modifier.padding(14.dp)) {
             Text(text)
         }
+    }
+}
+
+private fun formatPercent(value: Double): String {
+    return if (abs(value - value.roundToInt()) < 0.05) {
+        value.roundToInt().toString()
+    } else {
+        String.format(Locale("es", "AR"), "%.1f", value)
     }
 }
 

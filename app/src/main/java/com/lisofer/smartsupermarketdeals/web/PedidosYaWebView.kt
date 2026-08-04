@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import org.json.JSONObject
 
 private val allowedOrigins = setOf(
     "https://pedidosya.com.ar",
@@ -27,19 +28,36 @@ private const val captureScript = """
   if (window.__smartDealsCaptureInstalled) return;
   window.__smartDealsCaptureInstalled = true;
 
+  const bridgePost = value => {
+    try {
+      if (window.SmartDealsBridge && window.SmartDealsBridge.postMessage) {
+        window.SmartDealsBridge.postMessage(JSON.stringify(value));
+      }
+    } catch (_) {}
+  };
+
+  const sendEvent = (event, data) => bridgePost(Object.assign({ event }, data || {}));
   const sent = new Set();
+  const quickHash = value => {
+    let hash = 2166136261;
+    const step = Math.max(1, Math.floor(value.length / 700));
+    for (let index = 0; index < value.length; index += step) {
+      hash ^= value.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16);
+  };
+
   const send = (url, body) => {
     try {
       if (!body || body.length > 5000000) return;
       const value = body.trim();
       if (!(value.startsWith('{') || value.startsWith('['))) return;
-      const fingerprint = (url || '') + '|' + value.length + '|' + value.slice(0, 140);
+      const fingerprint = (url || '') + '|' + value.length + '|' + quickHash(value);
       if (sent.has(fingerprint)) return;
       sent.add(fingerprint);
-      if (sent.size > 500) sent.delete(sent.values().next().value);
-      if (window.SmartDealsBridge && window.SmartDealsBridge.postMessage) {
-        window.SmartDealsBridge.postMessage(JSON.stringify({ url: url || '', body: value }));
-      }
+      if (sent.size > 1200) sent.delete(sent.values().next().value);
+      bridgePost({ url: url || '', body: value });
     } catch (_) {}
   };
 
@@ -102,7 +120,7 @@ private const val captureScript = """
 
   const moneySource = '\\' + String.fromCharCode(36) + '\\s*[\\d][\\d.,]*';
   const moneyPattern = new RegExp(moneySource);
-  const promoPattern = /(\d{1,2}\s*%|promo|oferta|descuento|ahorr|2\s*x\s*1|3\s*x\s*2|segunda\s+unidad)/i;
+  const promoPattern = /((?:2\s*(?:da|do|°|º)?|segunda|segundo)\s*(?:unidad)?\s*(?:al|con|a|:)?\s*\d{1,3}(?:[.,]\d+)?\s*%?\s*(?:off|de descuento|descuento)?|\d{1,3}(?:[.,]\d+)?\s*%?\s*(?:off|de descuento|descuento)?.{0,20}?(?:2\s*(?:da|do|°|º)?|segunda|segundo)\s*(?:unidad)?|\d{1,2}\s*[x×]\s*\d{1,2}|lleva(?:ndo)?\s*\d{1,2}.{0,20}?paga(?:ndo)?\s*\d{1,2}|\d{1,3}(?:[.,]\d+)?\s*(?:%|por ciento)\s*(?:off|de descuento|descuento)?|promo|oferta|ahorr))/i;
   const ignoredLinePattern = /^(agregar|sumar|ver más|envío|delivery|cerrar|buscar|inicio|categorías?)$/i;
 
   const textOf = element => (element && (element.innerText || element.textContent) || '')
@@ -126,14 +144,14 @@ private const val captureScript = """
     );
     if (preferred) {
       const text = textOf(preferred);
-      if (text.length >= 8 && text.length <= 1200) return preferred;
+      if (text.length >= 8 && text.length <= 1400) return preferred;
     }
 
     let node = priceElement;
     for (let depth = 0; depth < 7 && node; depth += 1, node = node.parentElement) {
       const text = textOf(node);
       const prices = text.match(new RegExp(moneySource, 'g')) || [];
-      if (text.length >= 8 && text.length <= 650 && prices.length >= 1 && prices.length <= 5) {
+      if (text.length >= 8 && text.length <= 750 && prices.length >= 1 && prices.length <= 6) {
         return node;
       }
     }
@@ -167,7 +185,7 @@ private const val captureScript = """
     try {
       const leaves = Array.from(document.querySelectorAll('body *'))
         .filter(element => element.children.length === 0 && moneyPattern.test(textOf(element)))
-        .slice(0, 1800);
+        .slice(0, 3000);
       const products = new Map();
 
       leaves.forEach(priceLeaf => {
@@ -195,10 +213,10 @@ private const val captureScript = """
           container.getAttribute('data-id') ||
           (link && link.getAttribute('href')) ||
           name;
-        const key = String(id).slice(0, 220) + '|' + name;
+        const key = String(id).slice(0, 260) + '|' + name + '|' + price;
 
         products.set(key, {
-          id: String(id).slice(0, 220),
+          id: String(id).slice(0, 260),
           name,
           price,
           originalPrice,
@@ -208,9 +226,14 @@ private const val captureScript = """
       });
 
       if (products.size > 0) {
-        sendObject(location.href + '#visible-catalog', { products: Array.from(products.values()) });
+        sendObject(location.href + '#visible-catalog-' + Math.round(window.scrollY), {
+          products: Array.from(products.values()),
+        });
       }
-    } catch (_) {}
+      return products.size;
+    } catch (_) {
+      return 0;
+    }
   };
 
   let scanTimer = null;
@@ -219,9 +242,71 @@ private const val captureScript = """
     scanTimer = setTimeout(() => {
       emitEmbeddedJson();
       scanVisibleCatalog();
-    }, 700);
+    }, 500);
   };
   window.__smartDealsRescan = rescan;
+
+  const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+  window.__smartDealsStartExplore = async () => {
+    if (window.__smartDealsExploring) return;
+    window.__smartDealsExploring = true;
+    const originalY = window.scrollY;
+    let step = 0;
+    let stableBottomPasses = 0;
+    let previousHeight = 0;
+
+    sendEvent('explore_started');
+    await sleep(1200);
+
+    for (let index = 0; index < 48; index += 1) {
+      emitEmbeddedJson();
+      scanVisibleCatalog();
+      step += 1;
+      sendEvent('explore_progress', { step });
+
+      const documentHeight = Math.max(
+        document.body ? document.body.scrollHeight : 0,
+        document.documentElement ? document.documentElement.scrollHeight : 0
+      );
+      const maxY = Math.max(0, documentHeight - window.innerHeight);
+      const currentY = window.scrollY;
+
+      if (currentY >= maxY - 8) {
+        stableBottomPasses = documentHeight === previousHeight ? stableBottomPasses + 1 : 0;
+        previousHeight = documentHeight;
+        if (stableBottomPasses >= 3) break;
+        await sleep(900);
+      } else {
+        const increment = Math.max(480, Math.round(window.innerHeight * 0.72));
+        window.scrollTo(0, Math.min(maxY, currentY + increment));
+        await sleep(650);
+      }
+    }
+
+    const horizontalScrollers = Array.from(document.querySelectorAll('body *'))
+      .filter(element =>
+        element.scrollWidth > element.clientWidth + 160 &&
+        element.clientWidth > 180 &&
+        element.clientHeight < window.innerHeight * 0.9
+      )
+      .slice(0, 24);
+
+    for (const scroller of horizontalScrollers) {
+      const maxX = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
+      for (const ratio of [0, 0.5, 1]) {
+        scroller.scrollLeft = Math.round(maxX * ratio);
+        await sleep(350);
+        scanVisibleCatalog();
+      }
+    }
+
+    window.scrollTo(0, originalY);
+    await sleep(700);
+    emitEmbeddedJson();
+    scanVisibleCatalog();
+    sendEvent('explore_complete', { steps: step });
+    window.__smartDealsExploring = false;
+  };
 
   new MutationObserver(rescan).observe(document.documentElement, {
     subtree: true,
@@ -229,9 +314,9 @@ private const val captureScript = """
     characterData: true,
   });
   window.addEventListener('load', rescan);
-  setTimeout(rescan, 1200);
-  setTimeout(rescan, 3500);
-  setTimeout(rescan, 8000);
+  setTimeout(rescan, 1000);
+  setTimeout(rescan, 3000);
+  setTimeout(rescan, 7000);
 })();
 """
 
@@ -241,16 +326,21 @@ fun PedidosYaWebView(
     url: String,
     modifier: Modifier = Modifier,
     freshLoad: Boolean = false,
+    autoExplore: Boolean = false,
     onUrlChanged: (String) -> Unit = {},
     onTitleChanged: (String) -> Unit = {},
     onJsonPayload: (String) -> Unit = {},
     onPageFinished: () -> Unit = {},
+    onExplorationProgress: (Int) -> Unit = {},
+    onExplorationFinished: () -> Unit = {},
     onUnsupportedWebView: () -> Unit = {},
 ) {
     val currentOnUrlChanged = rememberUpdatedState(onUrlChanged)
     val currentOnTitleChanged = rememberUpdatedState(onTitleChanged)
     val currentOnPayload = rememberUpdatedState(onJsonPayload)
     val currentOnPageFinished = rememberUpdatedState(onPageFinished)
+    val currentOnExplorationProgress = rememberUpdatedState(onExplorationProgress)
+    val currentOnExplorationFinished = rememberUpdatedState(onExplorationFinished)
     val currentOnUnsupported = rememberUpdatedState(onUnsupportedWebView)
     val webViewHolder = remember { arrayOfNulls<WebView>(1) }
 
@@ -297,7 +387,10 @@ fun PedidosYaWebView(
                     override fun onPageFinished(view: WebView, finishedUrl: String) {
                         currentOnUrlChanged.value(finishedUrl)
                         currentOnPageFinished.value()
-                        view.evaluateJavascript("window.__smartDealsRescan && window.__smartDealsRescan();", null)
+                        view.evaluateJavascript(
+                            "window.__smartDealsRescan && window.__smartDealsRescan();",
+                            null,
+                        )
                         view.postDelayed({
                             runCatching {
                                 view.evaluateJavascript(
@@ -306,14 +399,16 @@ fun PedidosYaWebView(
                                 )
                             }
                         }, 2_500)
-                        view.postDelayed({
-                            runCatching {
-                                view.evaluateJavascript(
-                                    "window.__smartDealsRescan && window.__smartDealsRescan();",
-                                    null,
-                                )
-                            }
-                        }, 6_500)
+                        if (autoExplore) {
+                            view.postDelayed({
+                                runCatching {
+                                    view.evaluateJavascript(
+                                        "window.__smartDealsStartExplore && window.__smartDealsStartExplore();",
+                                        null,
+                                    )
+                                }
+                            }, 3_500)
+                        }
                     }
                 }
 
@@ -331,7 +426,16 @@ fun PedidosYaWebView(
                     ) { _, message, sourceOrigin, _, _ ->
                         val host = sourceOrigin.host.orEmpty()
                         if (host == "pedidosya.com.ar" || host.endsWith(".pedidosya.com.ar")) {
-                            message.data?.let(currentOnPayload.value)
+                            val raw = message.data ?: return@addWebMessageListener
+                            val envelope = runCatching { JSONObject(raw) }.getOrNull()
+                            when (envelope?.optString("event")) {
+                                "explore_progress" -> {
+                                    currentOnExplorationProgress.value(envelope.optInt("step", 0))
+                                }
+                                "explore_complete" -> currentOnExplorationFinished.value()
+                                "explore_started" -> Unit
+                                else -> currentOnPayload.value(raw)
+                            }
                         }
                     }
                     WebViewCompat.addDocumentStartJavaScript(
