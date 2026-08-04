@@ -75,14 +75,17 @@ internal class ProductParserEngine(private val sourceUrl: String) {
         val originalPrice = firstNumber(json, ORIGINAL_PRICE_KEYS)
             ?.takeIf { it > price && it <= MAX_PRICE }
 
-        // The v0.5 parser was effective because it searched below the product object.
-        // Keep that breadth, but let PromotionInterpreter enforce strict commercial syntax.
-        val deepPromotion = if (suppliedPromotion == null) {
-            PromotionInterpreter.fromProductSubtree(json)
-        } else {
-            null
+        // PedidosYa often separates the mechanic (SECOND_UNIT) from its numeric value.
+        // Reconstruct that product-wide context before accepting an isolated 50 as 50% direct.
+        val reconstructedSecond = SecondUnitPromotionResolver.fromProductSubtree(json)
+        val deepPromotion = PromotionInterpreter.fromProductSubtree(json)
+        val promotion = when {
+            reconstructedSecond != null -> reconstructedSecond
+            suppliedPromotion?.normalized?.kind == PromotionKind.SECOND_UNIT -> suppliedPromotion
+            deepPromotion?.normalized?.kind == PromotionKind.SECOND_UNIT -> deepPromotion
+            suppliedPromotion != null -> suppliedPromotion
+            else -> deepPromotion
         }
-        val promotion = suppliedPromotion ?: deepPromotion
         val normalizedPromotion = promotion?.normalized
             ?: originalPrice?.let { PromotionInterpreter.fromPrices(price, it) }
 
@@ -97,6 +100,8 @@ internal class ProductParserEngine(private val sourceUrl: String) {
         val sourceMarker = json.optString("source")
 
         val hasProductSignal = sourceMarker == "visible-dom" ||
+            sourceMarker == "exhaustive-dom" ||
+            sourceMarker == "large-json-fragment" ||
             explicitId != null ||
             IMAGE_KEYS.any(json::has) ||
             CATEGORY_KEYS.any(json::has) ||
@@ -337,8 +342,8 @@ internal class ProductParserEngine(private val sourceUrl: String) {
     private companion object {
         const val MIN_PRICE = 20.0
         const val MAX_PRICE = 100_000_000.0
-        const val MAX_DEPTH = 28
-        const val MAX_PRODUCTS = 30_000
-        const val LOCAL_SEARCH_DEPTH = 3
+        const val MAX_DEPTH = 32
+        const val MAX_PRODUCTS = 60_000
+        const val LOCAL_SEARCH_DEPTH = 4
     }
 }
