@@ -123,7 +123,10 @@ fun PedidosYaWebView(
                             CookieManager.getInstance().flush()
 
                             val rootLiteral = JSONObject.quote(currentRootUrl.value)
-                            val initialScript =
+                            val initialScript = if (autoExplore) {
+                                "window.__smartDealsEndpointMode = true; " +
+                                    "window.__smartDealsSetRoot && window.__smartDealsSetRoot($rootLiteral);"
+                            } else {
                                 "window.__smartDealsSetRoot && window.__smartDealsSetRoot($rootLiteral); " +
                                     "window.__smartDealsEmitEmbeddedJson && " +
                                     "window.__smartDealsEmitEmbeddedJson(); " +
@@ -131,12 +134,14 @@ fun PedidosYaWebView(
                                     "window.__smartDealsPromotionDomScan(); " +
                                     "window.__smartDealsExhaustiveRescan && " +
                                     "window.__smartDealsExhaustiveRescan();"
+                            }
                             view.evaluateJavascript(initialScript, null)
-                            view.postDelayed({
-                                runCatching { view.evaluateJavascript(initialScript, null) }
-                            }, 1_800)
 
-                            if (autoExplore) {
+                            if (!autoExplore) {
+                                view.postDelayed({
+                                    runCatching { view.evaluateJavascript(initialScript, null) }
+                                }, 1_800)
+                            } else {
                                 view.postDelayed({
                                     runCatching {
                                         view.evaluateJavascript(
@@ -147,7 +152,7 @@ fun PedidosYaWebView(
                                             null,
                                         )
                                     }
-                                }, 2_700)
+                                }, 1_350)
                             }
                         }
                     }
@@ -178,16 +183,18 @@ fun PedidosYaWebView(
                                 }
                             }
                         }
-                        WebViewCompat.addDocumentStartJavaScript(
-                            this,
-                            rawJsonCaptureScript,
-                            allowedOrigins,
-                        )
-                        WebViewCompat.addDocumentStartJavaScript(
-                            this,
-                            promotionDomCaptureScript,
-                            allowedOrigins,
-                        )
+                        if (!autoExplore) {
+                            WebViewCompat.addDocumentStartJavaScript(
+                                this,
+                                rawJsonCaptureScript,
+                                allowedOrigins,
+                            )
+                            WebViewCompat.addDocumentStartJavaScript(
+                                this,
+                                promotionDomCaptureScript,
+                                allowedOrigins,
+                            )
+                        }
                         WebViewCompat.addDocumentStartJavaScript(
                             this,
                             exhaustiveCatalogScript,
@@ -233,9 +240,7 @@ fun PedidosYaWebView(
                     .align(Alignment.TopStart)
                     .padding(4.dp),
                 onClick = { webViewHolder[0]?.goBack() },
-            ) {
-                Text("← Atrás")
-            }
+            ) { Text("← Atrás") }
         }
     }
 

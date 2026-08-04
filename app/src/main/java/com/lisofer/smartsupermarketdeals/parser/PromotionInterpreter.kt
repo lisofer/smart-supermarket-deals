@@ -1,5 +1,6 @@
 package com.lisofer.smartsupermarketdeals.parser
 
+import com.lisofer.smartsupermarketdeals.data.PromotionEvidence
 import com.lisofer.smartsupermarketdeals.data.PromotionKind
 import org.json.JSONArray
 import org.json.JSONObject
@@ -12,6 +13,7 @@ internal data class PromotionContext(
     val normalized: NormalizedPromotion,
     val displayLabel: String,
     val unambiguous: Boolean,
+    val evidence: PromotionEvidence = PromotionEvidence.PRODUCT_STRUCTURE,
 )
 
 internal data class NormalizedPromotion(
@@ -24,64 +26,47 @@ internal data class NormalizedPromotion(
 
 internal object PromotionInterpreter {
     fun fromObject(json: JSONObject): PromotionContext? {
+        val inherited = json.optBoolean("__smartDealsInherited", false)
         val rawTexts = LinkedHashSet<String>()
-        val percentKeys = LinkedHashSet<Double>()
-        val typed = mutableListOf<TypedPercent>()
-        val promoValues = mutableListOf<Any?>()
-
-        collectTyped(json, typed, depth = 0)
-        collectDirectHumanTexts(json, rawTexts)
-
-        val keys = json.keys()
-        while (keys.hasNext()) {
-            val key = keys.next()
-            val value = json.opt(key)
-            if (isPercentKey(key)) {
-                strictPercent(value, key)
-                    ?.takeIf { it in 0.5..100.0 }
-                    ?.let { percentKeys += rounded(it) }
-            }
-            if (isPromoKey(key)) {
-                promoValues += value
-                collectStrings(value, rawTexts, depth = 0)
-            }
-        }
-
-        promoValues.forEach { value ->
-            collectTyped(value, typed, depth = 0)
-            collectPercentKeys(value, percentKeys, depth = 0)
-        }
-
+        collectHumanTexts(json, rawTexts, depth = 0, insidePromo = false)
         val text = normalize(rawTexts.joinToString(" · ")).replace('×', 'x')
-        val typedSecond = typed.filter { it.secondUnit }.map { rounded(it.percent) }.distinct()
-        val typedDirect = typed.filterNot { it.secondUnit }.map { rounded(it.percent) }.distinct()
-        val textSecond = strictSecondPercent(text)
-        val structuredMultibuy = structuredMultibuy(json)
 
-        val promo = when {
-            typedSecond.size == 1 -> secondUnit(typedSecond.single())
-            textSecond != null -> secondUnit(textSecond)
-            SECOND_FREE.containsMatchIn(text) -> multibuy(2, 1)
-            structuredMultibuy != null -> structuredMultibuy
-            MULTIBUY.containsMatchIn(text) -> parseMultibuy(text)
-            TAKE_PAY.containsMatchIn(text) -> parseTakePay(text)
-            typedDirect.size == 1 -> direct(typedDirect.single())
-            percentKeys.size == 1 -> direct(percentKeys.single())
-            else -> directPercent(text)?.let(::direct)
+        val signals = StructuredSignals()
+        collectStructured(json, signals, depth = 0, insidePromo = false)
+
+        val textSecond = strictSecondPercent(text)
+        val textMultibuy = parseMultibuy(text) ?: parseTakePay(text)
+        val textDirect = explicitDirectPercent(text)
+        val structuredSecond = signals.percentages.singleOrNull()
+            ?.takeIf { signals.secondUnit }
+            ?.let(::secondUnit)
+        val structuredDirect = signals.percentages.singleOrNull()
+            ?.takeIf { signals.directPercentage && !signals.secondUnit }
+            ?.let(::direct)
+
+        val chosen = when {
+            textSecond != null -> Detection(secondUnit(textSecond), PromotionEvidence.PRODUCT_TEXT)
+            structuredSecond != null -> Detection(structuredSecond, PromotionEvidence.PRODUCT_STRUCTURE)
+            SECOND_FREE.containsMatchIn(text) -> Detection(multibuy(2, 1), PromotionEvidence.PRODUCT_TEXT)
+            textMultibuy != null -> Detection(textMultibuy, PromotionEvidence.PRODUCT_TEXT)
+            signals.multibuy != null -> Detection(signals.multibuy!!, PromotionEvidence.PRODUCT_STRUCTURE)
+            textDirect != null -> Detection(direct(textDirect), PromotionEvidence.PRODUCT_TEXT)
+            structuredDirect != null -> Detection(structuredDirect, PromotionEvidence.PRODUCT_STRUCTURE)
+            else -> null
         } ?: return null
 
+        val evidence = if (inherited) PromotionEvidence.INHERITED_SECTION else chosen.evidence
         val allPercents = buildList {
-            addAll(typedSecond)
-            addAll(typedDirect)
-            addAll(percentKeys)
+            addAll(signals.percentages)
             textSecond?.let(::add)
-            directPercent(text)?.let(::add)
+            textDirect?.let(::add)
         }.map(::rounded).distinct()
 
         return PromotionContext(
-            normalized = promo,
-            displayLabel = humanLabel(rawTexts.toList(), promo),
+            normalized = chosen.promotion,
+            displayLabel = humanLabel(rawTexts.toList(), chosen.promotion),
             unambiguous = allPercents.size <= 1,
+            evidence = evidence,
         )
     }
 
@@ -133,7 +118,17 @@ internal object PromotionInterpreter {
             normalized.contains("mechanic")
     }
 
-    private data class TypedPercent(val percent: Double, val secondUnit: Boolean)
+    private data class Detection(
+        val promotion: NormalizedPromotion,
+        val evidence: PromotionEvidence,
+    )
+
+    private data class StructuredSignals(
+        var secondUnit: Boolean = false,
+        var directPercentage: Boolean = false,
+        var multibuy: NormalizedPromotion? = null,
+        val percentages: LinkedHashSet<Double> = LinkedHashSet(),
+    )
 
     private fun collectSubtreeContexts(
         node: Any?,
@@ -166,120 +161,129 @@ internal object PromotionInterpreter {
 
     private fun bestContext(values: List<PromotionContext>): PromotionContext? {
         return values.maxWithOrNull(
-            compareBy<PromotionContext> { if (it.unambiguous) 1 else 0 }
+            compareBy<PromotionContext> { evidenceScore(it.evidence) }
+                .thenBy { if (it.unambiguous) 1 else 0 }
                 .thenBy { if (it.displayLabel == it.normalized.title) 0 else 1 }
                 .thenBy { it.displayLabel.length }
         )
     }
 
-    private fun collectDirectHumanTexts(json: JSONObject, output: MutableSet<String>) {
-        (TEXT_KEYS + TYPE_KEYS).distinct().forEach { key ->
-            val value = json.opt(key)
-            if (value is String) {
-                val cleaned = cleanText(value) ?: return@forEach
-                val normalized = normalize(cleaned).replace('×', 'x')
-                if (HUMAN_SIGNAL.containsMatchIn(normalized)) output += cleaned
-            }
-        }
+    private fun evidenceScore(evidence: PromotionEvidence): Int = when (evidence) {
+        PromotionEvidence.PRICE_PAIR -> 5
+        PromotionEvidence.PRODUCT_TEXT -> 4
+        PromotionEvidence.PRODUCT_STRUCTURE -> 3
+        PromotionEvidence.INHERITED_SECTION -> 1
     }
 
-    private fun collectTyped(value: Any?, output: MutableList<TypedPercent>, depth: Int) {
-        if (value == null || depth > SEARCH_DEPTH || output.size >= MAX_TYPED) return
-        when (value) {
-            is JSONObject -> {
-                val descriptor = TYPE_KEYS
-                    .mapNotNull { value.opt(it).stringValue() }
-                    .joinToString(" ")
-                    .let(::normalize)
-                val second = isSecondDescriptor(descriptor)
-                val percentage = descriptor.contains("percentage") ||
-                    descriptor.contains("percent") || descriptor.contains("porcentaje") ||
-                    descriptor.contains("discount") || descriptor.contains("descuento")
-                if (percentage || second) {
-                    firstStrictNumber(value, PERCENT_VALUE_KEYS)
-                        ?.takeIf { it in 0.5..100.0 }
-                        ?.let { output += TypedPercent(it, second) }
-                }
-
-                val keys = value.keys()
-                while (keys.hasNext() && output.size < MAX_TYPED) {
-                    val key = keys.next()
-                    val normalizedKey = key.lowercase(Locale.ROOT)
-                    if (isPromoKey(key) || normalizedKey in META_WRAPPERS) {
-                        collectTyped(value.opt(key), output, depth + 1)
-                    }
-                }
+    private fun collectHumanTexts(
+        node: Any?,
+        output: MutableSet<String>,
+        depth: Int,
+        insidePromo: Boolean,
+    ) {
+        if (node == null || depth > SEARCH_DEPTH || output.size >= MAX_TEXTS) return
+        when (node) {
+            is String -> {
+                if (insidePromo) cleanText(node)?.takeIf(::hasExplicitHumanSignal)?.let(output::add)
             }
-            is JSONArray -> {
-                for (index in 0 until value.length()) {
-                    collectTyped(value.opt(index), output, depth + 1)
-                    if (output.size >= MAX_TYPED) break
-                }
-            }
-        }
-    }
-
-    private fun isSecondDescriptor(descriptor: String): Boolean {
-        return descriptor.contains("second unit") || descriptor.contains("second_unit") ||
-            descriptor.contains("secondunit") || descriptor.contains("second item") ||
-            descriptor.contains("second_item") || descriptor.contains("second product") ||
-            descriptor.contains("second_product") || descriptor.contains("segunda unidad") ||
-            descriptor.contains("segundo producto") || descriptor.contains("segunda") ||
-            descriptor.contains("segundo") || descriptor.contains("2da") ||
-            descriptor.contains("2do")
-    }
-
-    private fun collectPercentKeys(value: Any?, output: MutableSet<Double>, depth: Int) {
-        if (value == null || depth > SEARCH_DEPTH || output.size >= MAX_PERCENTS) return
-        when (value) {
-            is JSONObject -> {
-                val keys = value.keys()
-                while (keys.hasNext()) {
-                    val key = keys.next()
-                    val child = value.opt(key)
-                    if (isPercentKey(key)) {
-                        strictPercent(child, key)
-                            ?.takeIf { it in 0.5..100.0 }
-                            ?.let { output += rounded(it) }
-                    }
-                    if (child is JSONObject || child is JSONArray) {
-                        collectPercentKeys(child, output, depth + 1)
-                    }
-                }
-            }
-            is JSONArray -> for (index in 0 until value.length()) {
-                collectPercentKeys(value.opt(index), output, depth + 1)
-            }
-        }
-    }
-
-    private fun collectStrings(value: Any?, output: MutableSet<String>, depth: Int) {
-        if (value == null || depth > SEARCH_DEPTH || output.size >= MAX_TEXTS) return
-        when (value) {
-            is String -> cleanText(value)?.let(output::add)
             is JSONObject -> {
                 (TEXT_KEYS + TYPE_KEYS).distinct().forEach { key ->
-                    cleanText(value.optString(key))?.let(output::add)
+                    val raw = node.opt(key)
+                    if (raw is String) {
+                        cleanText(raw)?.takeIf(::hasExplicitHumanSignal)?.let(output::add)
+                    }
                 }
-                val keys = value.keys()
+                val keys = node.keys()
                 while (keys.hasNext() && output.size < MAX_TEXTS) {
-                    collectStrings(value.opt(keys.next()), output, depth + 1)
+                    val key = keys.next()
+                    if (key == "__smartDealsSectionPromotion" && !insidePromo) continue
+                    val child = node.opt(key)
+                    val childPromo = insidePromo || isPromoKey(key) || normalizedKey(key) in META_WRAPPERS
+                    if (child is JSONObject || child is JSONArray || (child is String && childPromo)) {
+                        collectHumanTexts(child, output, depth + 1, childPromo)
+                    }
                 }
             }
-            is JSONArray -> for (index in 0 until value.length()) {
-                collectStrings(value.opt(index), output, depth + 1)
+            is JSONArray -> for (index in 0 until node.length()) {
+                collectHumanTexts(node.opt(index), output, depth + 1, insidePromo)
                 if (output.size >= MAX_TEXTS) break
             }
         }
     }
 
-    private fun isPercentKey(key: String): Boolean {
-        val normalized = key.lowercase(Locale.ROOT)
-        return PERCENT_KEYS.any { it.equals(key, ignoreCase = true) } ||
-            ((normalized.contains("discount") || normalized.contains("saving") ||
-                normalized.contains("benefit")) &&
-                (normalized.contains("percent") || normalized.contains("percentage") ||
-                    normalized.contains("rate") || normalized.contains("ratio")))
+    private fun collectStructured(
+        node: Any?,
+        output: StructuredSignals,
+        depth: Int,
+        insidePromo: Boolean,
+    ) {
+        if (node == null || depth > SEARCH_DEPTH) return
+        when (node) {
+            is JSONObject -> {
+                val descriptor = TYPE_KEYS
+                    .mapNotNull { node.opt(it).stringValue() }
+                    .joinToString(" ")
+                    .let(::normalize)
+                    .replace('_', ' ')
+
+                val secondHere = isSecondDescriptor(descriptor) ||
+                    node.keys().asSequence().any { isSecondDescriptor(normalize(it).replace('_', ' ')) }
+                val directHere = descriptor.contains("percentage") ||
+                    descriptor.contains("percent") || descriptor.contains("porcentaje") ||
+                    descriptor.contains("discount") || descriptor.contains("descuento")
+                val explicitPromoObject = insidePromo ||
+                    node.keys().asSequence().any(::isPromoKey) ||
+                    node.keys().asSequence().any(::isStrongPercentKey)
+
+                if (secondHere) output.secondUnit = true
+                if (directHere) output.directPercentage = true
+
+                structuredMultibuy(node)?.let { output.multibuy = it }
+
+                if (secondHere || directHere || explicitPromoObject) {
+                    PERCENT_VALUE_KEYS.forEach { key ->
+                        strictPercent(node.opt(key), key)
+                            ?.takeIf { it in 0.5..100.0 }
+                            ?.let(output.percentages::add)
+                    }
+                    val keys = node.keys()
+                    while (keys.hasNext()) {
+                        val key = keys.next()
+                        if (isStrongPercentKey(key)) {
+                            strictPercent(node.opt(key), key)
+                                ?.takeIf { it in 0.5..100.0 }
+                                ?.let {
+                                    output.percentages += rounded(it)
+                                    output.directPercentage = true
+                                }
+                        }
+                    }
+                }
+
+                val keys = node.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    if (isProductCollectionKey(key) ||
+                        (key == "__smartDealsSectionPromotion" && !insidePromo)) continue
+                    val child = node.opt(key)
+                    val childPromo = insidePromo || isPromoKey(key) || normalizedKey(key) in META_WRAPPERS
+                    if (child is JSONObject || child is JSONArray) {
+                        collectStructured(child, output, depth + 1, childPromo)
+                    }
+                }
+            }
+            is JSONArray -> for (index in 0 until node.length()) {
+                collectStructured(node.opt(index), output, depth + 1, insidePromo)
+            }
+        }
+    }
+
+    private fun isSecondDescriptor(descriptor: String): Boolean {
+        return descriptor.contains("second unit") || descriptor.contains("second item") ||
+            descriptor.contains("second product") || descriptor.contains("segunda unidad") ||
+            descriptor.contains("segundo producto") || descriptor.contains("segunda") ||
+            descriptor.contains("segundo") || descriptor.contains("2da") ||
+            descriptor.contains("2do")
     }
 
     private fun structuredMultibuy(json: JSONObject): NormalizedPromotion? {
@@ -317,18 +321,14 @@ internal object PromotionInterpreter {
         val match = MULTIBUY.find(text) ?: return null
         val quantity = match.groupValues[1].toIntOrNull() ?: return null
         val paid = match.groupValues[2].toIntOrNull() ?: return null
-        return if (quantity in 2..12 && paid in 1 until quantity) {
-            multibuy(quantity, paid)
-        } else null
+        return if (quantity in 2..12 && paid in 1 until quantity) multibuy(quantity, paid) else null
     }
 
     private fun parseTakePay(text: String): NormalizedPromotion? {
         val match = TAKE_PAY.find(text) ?: return null
         val quantity = match.groupValues[1].toIntOrNull() ?: return null
         val paid = match.groupValues[2].toIntOrNull() ?: return null
-        return if (quantity in 2..12 && paid in 1 until quantity) {
-            multibuy(quantity, paid)
-        } else null
+        return if (quantity in 2..12 && paid in 1 until quantity) multibuy(quantity, paid) else null
     }
 
     private fun strictSecondPercent(text: String): Double? {
@@ -336,9 +336,10 @@ internal object PromotionInterpreter {
             ?: SECOND_REVERSE.find(text)?.groupValues?.getOrNull(1)?.toPercent()
     }
 
-    private fun directPercent(text: String): Double? {
-        return DIRECT_PERCENT.find(text)?.groupValues?.getOrNull(1)?.toPercent()
-            ?: DIRECT_OFF.find(text)?.groupValues?.getOrNull(1)?.toPercent()
+    private fun explicitDirectPercent(text: String): Double? {
+        return DIRECT_FORWARD.find(text)?.groupValues?.getOrNull(1)?.toPercent()
+            ?: DIRECT_REVERSE.find(text)?.groupValues?.getOrNull(1)?.toPercent()
+            ?: DIRECT_MINUS.find(text)?.groupValues?.getOrNull(1)?.toPercent()
     }
 
     private fun secondUnit(percent: Double): NormalizedPromotion {
@@ -378,24 +379,36 @@ internal object PromotionInterpreter {
             .map { it.replace(Regex("\\s+"), " ").trim() }
             .filter { it.length in 2..180 }
             .filterNot(::internalMetadata)
-            .filter { HUMAN_SIGNAL.containsMatchIn(normalize(it).replace('×', 'x')) }
+            .filter(::hasExplicitHumanSignal)
             .distinctBy(::normalize)
             .take(2)
             .toList()
         return candidates.joinToString(" · ").takeIf(String::isNotBlank) ?: promo.title
     }
 
+    private fun hasExplicitHumanSignal(value: String): Boolean {
+        val normalized = normalize(value).replace('×', 'x')
+        return strictSecondPercent(normalized) != null ||
+            SECOND_FREE.containsMatchIn(normalized) ||
+            MULTIBUY.containsMatchIn(normalized) ||
+            TAKE_PAY.containsMatchIn(normalized) ||
+            explicitDirectPercent(normalized) != null
+    }
+
     private fun internalMetadata(value: String): Boolean {
         val normalized = normalize(value)
         return UUID.matches(value.trim()) || LONG_HEX.matches(value.trim()) ||
             normalized in INTERNAL_TOKENS ||
-            (normalized.matches(Regex("^[a-z_]+$")) &&
-                !HUMAN_SIGNAL.containsMatchIn(normalized))
+            (normalized.matches(Regex("^[a-z_]+$")) && !hasExplicitHumanSignal(normalized))
     }
 
-    private fun firstStrictNumber(json: JSONObject, keys: List<String>): Double? {
-        keys.forEach { key -> strictPercent(json.opt(key), key)?.let { return it } }
-        return null
+    private fun isStrongPercentKey(key: String): Boolean {
+        val normalized = normalizedKey(key)
+        return STRONG_PERCENT_KEYS.any { normalized == normalizedKey(it) } ||
+            ((normalized.contains("discount") || normalized.contains("saving") ||
+                normalized.contains("benefit") || normalized.contains("descuento")) &&
+                (normalized.contains("percent") || normalized.contains("percentage") ||
+                    normalized.contains("rate") || normalized.contains("ratio")))
     }
 
     private fun strictPercent(value: Any?, key: String): Double? {
@@ -431,8 +444,10 @@ internal object PromotionInterpreter {
             .trim()
     }
 
+    private fun normalizedKey(value: String): String = normalize(value).replace('-', '_').replace(' ', '_')
+
     private fun isProductCollectionKey(key: String): Boolean {
-        val normalized = key.lowercase(Locale.ROOT)
+        val normalized = normalizedKey(key)
         return normalized == "products" || normalized == "items" ||
             normalized == "productlist" || normalized == "product_list" ||
             normalized == "catalogitems" || normalized == "catalog_items" ||
@@ -440,7 +455,8 @@ internal object PromotionInterpreter {
             normalized == "elements" || normalized == "skus" ||
             normalized == "variants" || normalized == "children" ||
             normalized.contains("products") || normalized.contains("product_list") ||
-            normalized.contains("catalogitem")
+            normalized.contains("catalogitem") || normalized.contains("recommend") ||
+            normalized.contains("related") || normalized.contains("similar")
     }
 
     private fun String.toPercent(): Double? = replace(',', '.').toDoubleOrNull()
@@ -468,28 +484,25 @@ internal object PromotionInterpreter {
             "(?:off|dto|de descuento|descuento).{0,35}?\\b$SECOND_TOKEN" +
             "\\s*(?:unidad|producto|item)?\\b"
     )
-    private val DIRECT_PERCENT = Regex(
-        "(?:-|ahorra|hasta|descuento)?\\s*(\\d{1,3}(?:[.,]\\d+)?)\\s*%"
+    private val DIRECT_FORWARD = Regex(
+        "\\b(?:descuento|ahorra|promo(?:cion)?|oferta|off|dto)\\b" +
+            ".{0,20}?(\\d{1,3}(?:[.,]\\d+)?)\\s*%"
     )
-    private val DIRECT_OFF = Regex("\\b(\\d{1,3}(?:[.,]\\d+)?)\\s*(?:off|dto)\\b")
-    private val HUMAN_SIGNAL = Regex(
-        "(?:\\d{1,3}(?:[.,]\\d+)?\\s*%|\\d{1,2}\\s*[x×]\\s*\\d{1,2}|" +
-            "segunda|segundo|2\\s*\\.?\\s*(?:da|do)|off|descuento|ahorra|" +
-            "oferta|promo|gratis|lleva|paga)"
+    private val DIRECT_REVERSE = Regex(
+        "\\b(\\d{1,3}(?:[.,]\\d+)?)\\s*%\\s*(?:off|dto|de descuento|descuento)\\b"
     )
-    private val STRICT_PERCENT = Regex(
-        "^\\s*(-?\\d{1,3}(?:[.,]\\d+)?)\\s*%?\\s*$"
-    )
+    private val DIRECT_MINUS = Regex("(?:^|\\s)-(\\d{1,3}(?:[.,]\\d+)?)\\s*%")
+    private val STRICT_PERCENT = Regex("^\\s*(-?\\d{1,3}(?:[.,]\\d+)?)\\s*%?\\s*$")
     private val UUID = Regex(
         "(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
     )
     private val LONG_HEX = Regex("(?i)^[0-9a-f]{18,}$")
 
-    private val PERCENT_KEYS = listOf(
+    private val STRONG_PERCENT_KEYS = listOf(
         "discountPercentage", "discount_percentage", "discountPercent", "discount_percent",
         "percentageOff", "percentage_off", "percentOff", "percent_off",
         "discountRate", "discount_rate", "savingsPercentage", "savings_percentage",
-        "benefitPercentage", "benefit_percentage", "percentage", "percent",
+        "benefitPercentage", "benefit_percentage",
     )
     private val PERCENT_VALUE_KEYS = listOf(
         "percentage", "percent", "value", "discountValue", "discount_value",
@@ -506,7 +519,7 @@ internal object PromotionInterpreter {
         "promoLabel", "promo_label", "promoText", "promo_text", "badge", "badges",
         "promotion", "promotions", "offer", "offers", "campaign", "campaigns",
         "tags", "benefit", "benefits", "deal", "deals", "commercial", "commercialData",
-        "commercial_data", "mechanic", "mechanics",
+        "commercial_data", "mechanic", "mechanics", "__smartDealsSectionPromotion",
     )
     private val TEXT_KEYS = listOf(
         "name", "title", "label", "text", "description", "message", "value",
@@ -530,8 +543,6 @@ internal object PromotionInterpreter {
 
     private const val SEARCH_DEPTH = 7
     private const val SUBTREE_DEPTH = 8
-    private const val MAX_TEXTS = 32
-    private const val MAX_TYPED = 40
-    private const val MAX_PERCENTS = 40
-    private const val MAX_SUBTREE_CONTEXTS = 48
+    private const val MAX_TEXTS = 40
+    private const val MAX_SUBTREE_CONTEXTS = 64
 }

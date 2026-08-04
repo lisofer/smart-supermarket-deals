@@ -1,6 +1,7 @@
 package com.lisofer.smartsupermarketdeals.parser
 
 import com.lisofer.smartsupermarketdeals.data.CapturedProduct
+import com.lisofer.smartsupermarketdeals.data.PromotionEvidence
 import com.lisofer.smartsupermarketdeals.data.PromotionKind
 import org.json.JSONArray
 import org.json.JSONObject
@@ -35,33 +36,50 @@ internal class ProductParserEngine(private val sourceUrl: String) {
         inheritedPromotion: PromotionContext?,
     ) {
         val ownPromotion = PromotionInterpreter.fromObject(json)
-        candidate(json, ownPromotion ?: inheritedPromotion)?.let { incoming ->
+        val payloadInheritedPromotion = json.optJSONObject("__smartDealsSectionPromotion")
+            ?.let(PromotionInterpreter::fromObject)
+            ?.copy(evidence = PromotionEvidence.INHERITED_SECTION)
+        candidate(
+            json = json,
+            ownPromotion = ownPromotion,
+            inheritedPromotion = payloadInheritedPromotion ?: inheritedPromotion,
+        )?.let { incoming ->
             output[incoming.key] = ProductJsonExtractor.prefer(output[incoming.key], incoming)
         }
 
-        val promotionToPropagate = when {
-            ownPromotion != null && ownPromotion.unambiguous && hasProductCollection(json) -> ownPromotion
-            inheritedPromotion != null -> inheritedPromotion
-            else -> null
-        }
+        val sectionPromotion = ownPromotion
+            ?.takeIf { canPropagate(it, json, depth) }
+            ?.copy(evidence = PromotionEvidence.INHERITED_SECTION)
 
         val keys = json.keys()
         while (keys.hasNext()) {
             val key = keys.next()
             val value = json.opt(key)
             val childPromotion = when {
-                ownPromotion != null && ownPromotion.unambiguous &&
-                    (isProductCollectionKey(key) || isWrapperKey(key)) -> ownPromotion
-                promotionToPropagate != null &&
-                    (isProductCollectionKey(key) || isWrapperKey(key) || inheritedPromotion != null) ->
-                    promotionToPropagate
+                isProductCollectionKey(key) -> sectionPromotion ?: inheritedPromotion
+                isWrapperKey(key) -> sectionPromotion ?: inheritedPromotion
                 else -> null
             }
             walk(value, depth + 1, childPromotion)
         }
     }
 
-    private fun candidate(json: JSONObject, suppliedPromotion: PromotionContext?): CapturedProduct? {
+    private fun canPropagate(
+        promotion: PromotionContext,
+        json: JSONObject,
+        depth: Int,
+    ): Boolean {
+        if (depth < 1 || !promotion.unambiguous || !hasProductCollection(json)) return false
+        if (promotion.evidence == PromotionEvidence.INHERITED_SECTION) return false
+        return promotion.normalized.kind == PromotionKind.SECOND_UNIT ||
+            promotion.normalized.kind == PromotionKind.MULTIBUY
+    }
+
+    private fun candidate(
+        json: JSONObject,
+        ownPromotion: PromotionContext?,
+        inheritedPromotion: PromotionContext?,
+    ): CapturedProduct? {
         val name = firstText(json, NAME_KEYS)
             ?.replace(Regex("\\s+"), " ")
             ?.trim()
@@ -74,22 +92,46 @@ internal class ProductParserEngine(private val sourceUrl: String) {
 
         val originalPrice = firstNumber(json, ORIGINAL_PRICE_KEYS)
             ?.takeIf { it > price && it <= MAX_PRICE }
+        val pricePromotion = originalPrice?.let { PromotionInterpreter.fromPrices(price, it) }
+        val sourceMarker = json.optString("source")
 
-        // PedidosYa often separates the mechanic (SECOND_UNIT) from its numeric value.
-        // Reconstruct that product-wide context before accepting an isolated 50 as 50% direct.
-        val reconstructedSecond =
-            SecondUnitPromotionResolver.fromProductSubtree(json)
-                ?: SplitSecondUnitTextResolver.fromProductSubtree(json)
-        val deepPromotion = PromotionInterpreter.fromProductSubtree(json)
-        val promotion = when {
-            reconstructedSecond != null -> reconstructedSecond
-            suppliedPromotion?.normalized?.kind == PromotionKind.SECOND_UNIT -> suppliedPromotion
-            deepPromotion?.normalized?.kind == PromotionKind.SECOND_UNIT -> deepPromotion
-            suppliedPromotion != null -> suppliedPromotion
-            else -> deepPromotion
+        val resolverProduct = if (json.has("__smartDealsSectionPromotion")) {
+            JSONObject(json.toString()).apply { remove("__smartDealsSectionPromotion") }
+        } else {
+            json
         }
-        val normalizedPromotion = promotion?.normalized
-            ?: originalPrice?.let { PromotionInterpreter.fromPrices(price, it) }
+        val structuredSecond = SecondUnitPromotionResolver.fromProductSubtree(resolverProduct)
+            ?.takeIf { hasTypedSecondUnitEvidence(resolverProduct, it) }
+        val textSecond = SplitSecondUnitTextResolver.fromProductSubtree(resolverProduct)
+            ?.takeIf { hasExplicitSecondUnitTextEvidence(resolverProduct) }
+            ?.copy(evidence = PromotionEvidence.PRODUCT_TEXT)
+        val reconstructedSecond = structuredSecond ?: textSecond
+        val deepPromotion = PromotionInterpreter.fromProductSubtree(json)
+
+        val specificPromotion = listOfNotNull(reconstructedSecond, deepPromotion, ownPromotion)
+            .firstOrNull { context ->
+                context.normalized.kind == PromotionKind.SECOND_UNIT ||
+                    context.normalized.kind == PromotionKind.MULTIBUY
+            }
+        val directPromotion = listOfNotNull(deepPromotion, ownPromotion)
+            .firstOrNull { context ->
+                context.normalized.kind == PromotionKind.DIRECT_PERCENT &&
+                    context.evidence != PromotionEvidence.INHERITED_SECTION &&
+                    (sourceMarker !in DOM_SOURCES || originalPrice != null)
+            }
+        val acceptedInherited = inheritedPromotion?.takeIf { context ->
+            context.normalized.kind == PromotionKind.SECOND_UNIT ||
+                context.normalized.kind == PromotionKind.MULTIBUY
+        }
+
+        val selectedContext = specificPromotion ?: acceptedInherited
+        val normalizedPromotion = selectedContext?.normalized
+            ?: pricePromotion
+            ?: directPromotion?.normalized
+        val promotionEvidence = selectedContext?.evidence
+            ?: pricePromotion?.let { PromotionEvidence.PRICE_PAIR }
+            ?: directPromotion?.evidence
+        val labelContext = selectedContext ?: directPromotion
 
         val strongId = firstText(json, STRONG_ID_KEYS)?.trim()?.takeIf(String::isNotBlank)
         val localId = json.opt("id").let(::textValue)?.trim()?.takeIf(String::isNotBlank)
@@ -99,11 +141,8 @@ internal class ProductParserEngine(private val sourceUrl: String) {
         val linkIdentity = firstText(json, LINK_KEYS)?.trim().orEmpty()
         val brandIdentity = firstText(json, BRAND_KEYS)?.trim().orEmpty()
         val presentationIdentity = firstText(json, PRESENTATION_KEYS)?.trim().orEmpty()
-        val sourceMarker = json.optString("source")
 
-        val hasProductSignal = sourceMarker == "visible-dom" ||
-            sourceMarker == "exhaustive-dom" ||
-            sourceMarker == "large-json-fragment" ||
+        val hasProductSignal = sourceMarker in PRODUCT_SOURCES ||
             explicitId != null ||
             IMAGE_KEYS.any(json::has) ||
             CATEGORY_KEYS.any(json::has) ||
@@ -132,7 +171,6 @@ internal class ProductParserEngine(private val sourceUrl: String) {
         } else {
             stableIdentity
         }
-        val categoryIdentity = normalizedPromotion?.categoryKey.orEmpty()
         val advertised = normalizedPromotion
             ?.takeIf {
                 it.kind == PromotionKind.DIRECT_PERCENT ||
@@ -140,19 +178,87 @@ internal class ProductParserEngine(private val sourceUrl: String) {
             }
             ?.advertisedPercent
 
+        val promoLabel = when {
+            promotionEvidence == PromotionEvidence.PRICE_PAIR -> normalizedPromotion?.title
+            labelContext != null -> labelContext.displayLabel
+            else -> normalizedPromotion?.title
+        }
+
         return CapturedProduct(
-            key = "product:${sha256("$fallbackIdentity|$categoryIdentity")}",
+            key = "product:${sha256(fallbackIdentity)}",
             name = name,
             price = price,
             originalPrice = originalPrice,
             advertisedDiscountPercent = advertised,
-            promoLabel = promotion?.displayLabel ?: normalizedPromotion?.title,
+            promoLabel = promoLabel,
             promotionCategory = normalizedPromotion?.categoryKey,
             promotionTitle = normalizedPromotion?.title,
             effectiveDiscountPercent = normalizedPromotion?.effectivePercent,
             promotionKind = normalizedPromotion?.kind,
+            promotionEvidence = promotionEvidence,
             sourceUrl = sourceUrl,
         )
+    }
+
+
+
+    private fun hasExplicitSecondUnitTextEvidence(json: JSONObject): Boolean {
+        var hasSecond = false
+        var hasExplicitPercent = false
+        var sameText = false
+
+        fun inspect(node: Any?, depth: Int) {
+            if (node == null || depth > 10 || sameText) return
+            when (node) {
+                is String -> {
+                    val normalized = Normalizer.normalize(
+                        node.lowercase(Locale.ROOT).replace('_', ' ').replace('-', ' '),
+                        Normalizer.Form.NFD,
+                    ).replace(Regex("\\p{M}+"), "")
+                    val second = SECOND_UNIT_STRUCTURE.containsMatchIn(normalized)
+                    val percent = EXPLICIT_PERCENT_TEXT.containsMatchIn(normalized)
+                    hasSecond = hasSecond || second
+                    hasExplicitPercent = hasExplicitPercent || percent
+                    sameText = sameText || (second && NUMBER_PERCENT_TEXT.containsMatchIn(normalized))
+                }
+                is JSONObject -> {
+                    val keys = node.keys()
+                    while (keys.hasNext() && !sameText) {
+                        val key = keys.next()
+                        if (isProductCollectionKey(key) || key == "__smartDealsSectionPromotion") continue
+                        inspect(node.opt(key), depth + 1)
+                    }
+                }
+                is JSONArray -> for (index in 0 until node.length()) {
+                    inspect(node.opt(index), depth + 1)
+                    if (sameText) break
+                }
+            }
+        }
+
+        inspect(json, 0)
+        return sameText || (hasSecond && hasExplicitPercent)
+    }
+
+    private fun hasTypedSecondUnitEvidence(
+        json: JSONObject,
+        context: PromotionContext,
+    ): Boolean {
+        if (context.normalized.kind != PromotionKind.SECOND_UNIT) return false
+        val serialized = normalizeName(json.toString()).replace('-', ' ')
+        val hasSecondMechanic = SECOND_UNIT_STRUCTURE.containsMatchIn(serialized)
+        val hasPercentageMechanic = PERCENTAGE_STRUCTURE.containsMatchIn(serialized)
+        val advertised = context.normalized.advertisedPercent ?: return false
+        val number = if (kotlin.math.abs(advertised - advertised.toInt()) < 0.05) {
+            advertised.toInt().toString()
+        } else {
+            String.format(Locale.US, "%.1f", advertised)
+        }
+        val normalizedNumber = number.replace('.', ' ')
+        val hasValue = Regex(
+            "(?:value|amount|percent|percentage|benefit)[^0-9]{0,25}${Regex.escape(normalizedNumber)}"
+        ).containsMatchIn(serialized)
+        return hasSecondMechanic && hasPercentageMechanic && hasValue
     }
 
     private fun hasProductCollection(json: JSONObject): Boolean {
@@ -185,7 +291,8 @@ internal class ProductParserEngine(private val sourceUrl: String) {
             n == "results" || n == "entries" || n == "elements" ||
             n == "skus" || n == "variants" || n == "children" ||
             n.contains("products") || n.contains("catalogitem") ||
-            n.contains("product_list") || n.contains("productlist")
+            n.contains("product_list") || n.contains("productlist") ||
+            n.contains("recommend") || n.contains("related") || n.contains("similar")
     }
 
     private fun isWrapperKey(key: String): Boolean {
@@ -228,7 +335,7 @@ internal class ProductParserEngine(private val sourceUrl: String) {
         LOCAL_PRICE_CONTAINERS.forEach { containerKey ->
             val container = json.optJSONObject(containerKey) ?: return@forEach
             firstNumberRecursive(container, keys, depth + 1)?.let { return it }
-            if (keys === PRICE_KEYS) {
+            if (keys === PRICE_KEYS && containerKey in AMOUNT_PRICE_CONTAINERS) {
                 NUMBER_VALUES.forEach { key ->
                     numberValue(container.opt(key))?.let { return it }
                 }
@@ -290,7 +397,7 @@ internal class ProductParserEngine(private val sourceUrl: String) {
         "price", "currentPrice", "current_price", "salePrice", "sale_price",
         "finalPrice", "final_price", "discountedPrice", "discounted_price",
         "promotionalPrice", "promotional_price", "priceWithDiscount", "price_with_discount",
-        "unitPrice", "unit_price", "amount",
+        "unitPrice", "unit_price",
     )
     private val ORIGINAL_PRICE_KEYS = listOf(
         "originalPrice", "original_price", "regularPrice", "regular_price",
@@ -327,8 +434,11 @@ internal class ProductParserEngine(private val sourceUrl: String) {
         "product", "item", "content", "data", "details", "attributes", "metadata",
     )
     private val LOCAL_PRICE_CONTAINERS = listOf(
-        "pricing", "priceInfo", "price_info", "prices", "commercial", "sale",
+        "pricing", "priceInfo", "price_info", "prices", "sale",
         "product", "item", "content", "data", "details",
+    )
+    private val AMOUNT_PRICE_CONTAINERS = setOf(
+        "pricing", "priceInfo", "price_info", "prices", "sale",
     )
     private val TEXT_VALUES = listOf(
         "name", "title", "label", "text", "description", "value", "url",
@@ -339,6 +449,25 @@ internal class ProductParserEngine(private val sourceUrl: String) {
     private val WRAPPER_KEYS = setOf(
         "data", "content", "payload", "result", "results", "body", "response",
         "catalog", "menu", "store", "vendor",
+    )
+    private val DOM_SOURCES = setOf(
+        "visible-dom", "exhaustive-dom", "catalog-route-dom",
+    )
+    private val PRODUCT_SOURCES = DOM_SOURCES + setOf(
+        "large-json-fragment", "search-endpoint-fragment", "search-endpoint-v12",
+    )
+
+    private val EXPLICIT_PERCENT_TEXT = Regex(
+        "(?:\\d{1,3}(?:[.,]\\d+)?\\s*%\\s*(?:off|dto|de descuento|descuento)|" +
+            "(?:off|dto|descuento|ahorra|promo|oferta).{0,25}\\d{1,3}(?:[.,]\\d+)?\\s*%)"
+    )
+    private val NUMBER_PERCENT_TEXT = Regex("\\d{1,3}(?:[.,]\\d+)?\\s*%")
+
+    private val SECOND_UNIT_STRUCTURE = Regex(
+        "(?:second unit|second item|second product|segunda unidad|segundo producto|2da|2do)"
+    )
+    private val PERCENTAGE_STRUCTURE = Regex(
+        "(?:percentage|percent|porcentaje|discount percentage|discount percent|benefit percentage)"
     )
 
     private companion object {
