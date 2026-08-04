@@ -44,10 +44,10 @@ internal object PromotionInterpreter {
         }
 
         val typed = mutableListOf<TypedPercent>()
-        promoValues.forEach { value ->
-            collectTyped(value, typed, depth = 0)
-            collectPercentKeys(value, percentKeys, depth = 0)
-        }
+        // Inspect the object itself as well as nested promotion wrappers. Some PedidosYa
+        // payloads expose type/value directly instead of placing them under "promotion".
+        collectTyped(json, typed, depth = 0)
+        collectPercentKeys(json, percentKeys, depth = 0)
 
         val text = normalize(rawTexts.joinToString(" · ")).replace('×', 'x')
         val typedSecond = typed.filter { it.secondUnit }.map { rounded(it.percent) }.distinct()
@@ -108,12 +108,10 @@ internal object PromotionInterpreter {
                     firstStrictNumber(value, PERCENT_VALUE_KEYS)
                         ?.takeIf { it in 0.5..100.0 }
                         ?.let { p ->
-                            val second = descriptor.contains("second unit") ||
-                                descriptor.contains("second_unit") ||
-                                descriptor.contains("segunda unidad") ||
-                                descriptor.contains("segunda") ||
-                                descriptor.contains("2da") || descriptor.contains("2do")
-                            out += TypedPercent(p, second)
+                            out += TypedPercent(
+                                percent = p,
+                                secondUnit = SECOND_DESCRIPTOR.containsMatchIn(descriptor),
+                            )
                         }
                 }
                 val keys = value.keys()
@@ -197,6 +195,7 @@ internal object PromotionInterpreter {
 
     private fun strictSecondPercent(text: String): Double? {
         return SECOND_FORWARD.find(text)?.groupValues?.getOrNull(1)?.toPercent()
+            ?: SECOND_FORWARD_OFF.find(text)?.groupValues?.getOrNull(1)?.toPercent()
             ?: SECOND_REVERSE.find(text)?.groupValues?.getOrNull(1)?.toPercent()
     }
 
@@ -303,21 +302,33 @@ internal object PromotionInterpreter {
     private val MULTIBUY = Regex("\\b(\\d{1,2})\\s*x\\s*(\\d{1,2})\\b")
     private val TAKE_PAY = Regex("lleva(?:ndo)?\\s*(\\d{1,2}).{0,30}?paga(?:ndo)?\\s*(\\d{1,2})")
     private val SECOND_FREE = Regex(
-        "\\b(?:2\\s*(?:da|do|°|º)|segunda|segundo)\\s*(?:unidad)?\\s*(?:gratis|sin cargo)\\b"
+        "\\b(?:2\\s*(?:da|do)\\.?|2\\s*(?:°|º)|segunda|segundo)\\s*" +
+            "(?:unidad|producto|articulo|item)?\\s*(?:gratis|sin cargo)\\b"
     )
     private val SECOND_FORWARD = Regex(
-        "\\b(?:2\\s*(?:da|do|°|º)|segunda|segundo)\\s*(?:unidad)?\\s*" +
-            "(?:al|con|a|:)?\\s*(\\d{1,3}(?:[.,]\\d+)?)\\s*%"
+        "\\b(?:2\\s*(?:da|do)\\.?|2\\s*(?:°|º)|segunda|segundo)\\s*" +
+            "(?:unidad|producto|articulo|item)?\\s*(?:al|a|con|:)?\\s*" +
+            "(\\d{1,3}(?:[.,]\\d+)?)\\s*%\\s*(?:off|dto|de descuento|descuento)?\\b"
+    )
+    private val SECOND_FORWARD_OFF = Regex(
+        "\\b(?:2\\s*(?:da|do)\\.?|2\\s*(?:°|º)|segunda|segundo)\\s*" +
+            "(?:unidad|producto|articulo|item)?\\s*(?:al|a|con|:)?\\s*" +
+            "(\\d{1,3}(?:[.,]\\d+)?)\\s*(?:off|dto|de descuento|descuento)\\b"
     )
     private val SECOND_REVERSE = Regex(
         "\\b(\\d{1,3}(?:[.,]\\d+)?)\\s*%\\s*(?:off|dto|de descuento|descuento)?" +
-            ".{0,30}?\\b(?:2\\s*(?:da|do|°|º)|segunda|segundo)\\s*(?:unidad)?\\b"
+            ".{0,30}?\\b(?:2\\s*(?:da|do)\\.?|2\\s*(?:°|º)|segunda|segundo)\\s*" +
+            "(?:unidad|producto|articulo|item)?\\b"
+    )
+    private val SECOND_DESCRIPTOR = Regex(
+        "(?:second[_\\s-]*(?:unit|item|product)|segunda(?:\\s+unidad|\\s+compra)?|" +
+            "segundo(?:\\s+producto)?|2da|2do)"
     )
     private val DIRECT_PERCENT = Regex("(?:-|ahorra|hasta|descuento)?\\s*(\\d{1,3}(?:[.,]\\d+)?)\\s*%")
     private val DIRECT_OFF = Regex("\\b(\\d{1,3}(?:[.,]\\d+)?)\\s*(?:off|dto)\\b")
     private val HUMAN_SIGNAL = Regex(
         "(?:\\d{1,3}(?:[.,]\\d+)?\\s*%|\\d{1,2}\\s*x\\s*\\d{1,2}|" +
-            "segunda|2da|2do|off|descuento|ahorra|oferta|promo)"
+            "segunda|segundo|2da|2do|off|descuento|ahorra|oferta|promo)"
     )
     private val STRICT_PERCENT = Regex("^\\s*(-?\\d{1,3}(?:[.,]\\d+)?)\\s*%?\\s*$")
     private val UUID = Regex("(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
