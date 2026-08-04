@@ -39,6 +39,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.lisofer.smartsupermarketdeals.data.CapturedProduct
 import com.lisofer.smartsupermarketdeals.data.Deal
+import com.lisofer.smartsupermarketdeals.data.DealEvidence
 import com.lisofer.smartsupermarketdeals.data.DealsDatabase
 import com.lisofer.smartsupermarketdeals.data.Store
 import com.lisofer.smartsupermarketdeals.parser.ProductJsonExtractor
@@ -147,7 +148,7 @@ private fun HomeScreen(
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    text = "Historial local y Top 30 de oportunidades",
+                    text = "Promociones publicadas e historial local · Top 30",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
@@ -209,14 +210,14 @@ private fun HomeScreen(
 
             item {
                 HorizontalDivider()
-                Text("Mejores ofertas", fontWeight = FontWeight.SemiBold)
+                Text("Mejores oportunidades", fontWeight = FontWeight.SemiBold)
             }
 
             if (deals.isEmpty()) {
                 item {
                     InfoCard(
-                        "Todavía no hay datos. En la primera búsqueda se prioriza el descuento " +
-                            "publicado; desde la segunda se usa también tu historial real."
+                        "Todavía no se pudo leer el catálogo. La próxima versión de captura " +
+                            "revisa tanto los datos internos como los productos visibles en pantalla."
                     )
                 }
             } else {
@@ -313,12 +314,17 @@ private fun ScanScreen(
 
     LaunchedEffect(index, pageFinishedToken, products.size) {
         if (pageFinishedToken == 0) return@LaunchedEffect
-        status = if (products.isEmpty()) {
-            "Esperando el catálogo…"
-        } else {
-            "${products.size} productos detectados"
+        val promoCount = products.values.count { product ->
+            product.originalPrice != null ||
+                product.advertisedDiscountPercent != null ||
+                product.promoLabel != null
         }
-        delay(if (products.isEmpty()) 20_000 else 4_000)
+        status = if (products.isEmpty()) {
+            "Esperando el catálogo y leyendo la pantalla…"
+        } else {
+            "${products.size} productos · $promoCount con señal promocional"
+        }
+        delay(if (products.isEmpty()) 24_000 else 6_000)
         val snapshot = products.values.toList()
         withContext(Dispatchers.IO) { database.saveScan(store.id, snapshot) }
         if (index == stores.lastIndex) {
@@ -352,8 +358,8 @@ private fun ScanScreen(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(status)
                         Text(
-                            "La vista web se mantiene visible para que puedas resolver un inicio " +
-                                "de sesión o verificación si aparece.",
+                            "No busca solamente la palabra promo: revisa precio anterior, " +
+                                "porcentaje, etiquetas y cambios contra tu historial.",
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -381,6 +387,7 @@ private fun ScanScreen(
                     .fillMaxWidth()
                     .weight(1f),
                 url = store.url,
+                freshLoad = true,
                 onJsonPayload = { payload ->
                     ProductJsonExtractor.extract(payload).forEach { product ->
                         products[product.key] = product
@@ -407,15 +414,34 @@ private fun DealCard(deal: Deal) {
                 Text(formatter.format(deal.currentPrice), fontWeight = FontWeight.Bold)
             }
             Text(deal.storeName, style = MaterialTheme.typography.bodySmall)
+            deal.promoLabel?.takeIf { it.isNotBlank() }?.let { label ->
+                Text(label, color = MaterialTheme.colorScheme.primary)
+            }
+
             val reference = deal.referencePrice
             if (reference != null && deal.discountPercent > 0.0) {
+                val sourceText = when (deal.evidence) {
+                    DealEvidence.HISTORICAL -> "vs. tu historial"
+                    DealEvidence.ADVERTISED -> "según precio publicado"
+                    DealEvidence.BOTH -> "confirmado por precio publicado e historial"
+                    DealEvidence.BASELINE -> ""
+                }
                 Text(
                     "${deal.discountPercent.toInt()}% debajo de ${formatter.format(reference)}" +
+                        if (sourceText.isNotBlank()) " · $sourceText" else "" +
                         if (deal.isHistoricalMinimum) " · mínimo registrado" else "",
                     color = MaterialTheme.colorScheme.primary,
                 )
+            } else if (deal.evidence == DealEvidence.ADVERTISED) {
+                Text(
+                    "Tiene señal promocional, pero PedidosYa no expuso un precio comparable.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
             } else {
-                Text("Aún sin referencia histórica", style = MaterialTheme.typography.bodySmall)
+                Text(
+                    "Precio base guardado; se vuelve comparable en la próxima medición.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
         }
     }
