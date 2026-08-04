@@ -2,17 +2,34 @@ package com.lisofer.smartsupermarketdeals.web
 
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.os.Bundle
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
@@ -22,6 +39,17 @@ private val allowedOrigins = setOf(
     "https://pedidosya.com.ar",
     "https://*.pedidosya.com.ar",
 )
+
+private const val PEDIDOSYA_STORES_URL = "https://www.pedidosya.com.ar/cadenas/tiendas"
+
+/**
+ * Keeps the complete PedidosYa navigation state while the app process remains alive.
+ * Cookies, IndexedDB and localStorage are already persisted by WebView; this additionally
+ * preserves the back stack and sessionStorage-like page state when Compose destroys the view.
+ */
+private object PedidosYaSessionState {
+    var addStoreWebState: Bundle? = null
+}
 
 private const val captureScript = """
 (() => {
@@ -320,6 +348,34 @@ private const val captureScript = """
 })();
 """
 
+private fun navigateToSupermarkets(webView: WebView?) {
+    webView ?: return
+    val script = """
+        (() => {
+          const normalize = value => (value || '')
+            .toLowerCase()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          const elements = Array.from(document.querySelectorAll('a, button, [role="button"]'));
+          const exact = elements.find(element => /^supermercados?$/.test(normalize(element.innerText || element.textContent)));
+          const related = elements.find(element => /supermercad|mercado|tiendas/.test(normalize(element.innerText || element.textContent)));
+          const target = exact || related;
+          if (target) {
+            target.click();
+            return 'clicked';
+          }
+          return 'not-found';
+        })();
+    """.trimIndent()
+    webView.evaluateJavascript(script) { result ->
+        if (result.contains("not-found")) {
+            webView.loadUrl(PEDIDOSYA_STORES_URL)
+        }
+    }
+}
+
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 fun PedidosYaWebView(
@@ -343,125 +399,191 @@ fun PedidosYaWebView(
     val currentOnExplorationFinished = rememberUpdatedState(onExplorationFinished)
     val currentOnUnsupported = rememberUpdatedState(onUnsupportedWebView)
     val webViewHolder = remember { arrayOfNulls<WebView>(1) }
+    var canGoBack by remember { mutableStateOf(false) }
 
-    AndroidView(
-        modifier = modifier,
-        factory = { context ->
-            WebView(context).apply {
-                webViewHolder[0] = this
-                settings.javaScriptEnabled = true
-                settings.domStorageEnabled = true
-                settings.databaseEnabled = true
-                settings.setSupportMultipleWindows(false)
-                settings.cacheMode = if (freshLoad) {
-                    WebSettings.LOAD_NO_CACHE
-                } else {
-                    WebSettings.LOAD_DEFAULT
-                }
-                CookieManager.getInstance().setAcceptCookie(true)
-                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+    BackHandler(enabled = !autoExplore && canGoBack) {
+        webViewHolder[0]?.goBack()
+    }
 
-                webChromeClient = object : WebChromeClient() {
-                    override fun onReceivedTitle(view: WebView?, title: String?) {
-                        title?.takeIf { it.isNotBlank() }?.let(currentOnTitleChanged.value)
+    Box(modifier = modifier) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { context ->
+                WebView(context).apply {
+                    webViewHolder[0] = this
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.databaseEnabled = true
+                    settings.setSupportMultipleWindows(false)
+                    settings.cacheMode = if (freshLoad) {
+                        WebSettings.LOAD_NO_CACHE
+                    } else {
+                        WebSettings.LOAD_DEFAULT
                     }
-                }
+                    CookieManager.getInstance().setAcceptCookie(true)
+                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
-                webViewClient = object : WebViewClient() {
-                    override fun shouldOverrideUrlLoading(
-                        view: WebView,
-                        request: WebResourceRequest,
-                    ): Boolean {
-                        val target = request.url
-                        val host = target.host.orEmpty()
-                        return if (host == "pedidosya.com.ar" || host.endsWith(".pedidosya.com.ar")) {
-                            false
-                        } else {
-                            runCatching {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, target))
-                            }
-                            true
+                    webChromeClient = object : WebChromeClient() {
+                        override fun onReceivedTitle(view: WebView?, title: String?) {
+                            title?.takeIf { it.isNotBlank() }?.let(currentOnTitleChanged.value)
                         }
                     }
 
-                    override fun onPageFinished(view: WebView, finishedUrl: String) {
-                        currentOnUrlChanged.value(finishedUrl)
-                        currentOnPageFinished.value()
-                        view.evaluateJavascript(
-                            "window.__smartDealsRescan && window.__smartDealsRescan();",
-                            null,
-                        )
-                        view.postDelayed({
-                            runCatching {
-                                view.evaluateJavascript(
-                                    "window.__smartDealsRescan && window.__smartDealsRescan();",
-                                    null,
-                                )
+                    webViewClient = object : WebViewClient() {
+                        override fun shouldOverrideUrlLoading(
+                            view: WebView,
+                            request: WebResourceRequest,
+                        ): Boolean {
+                            val target = request.url
+                            val host = target.host.orEmpty()
+                            return if (host == "pedidosya.com.ar" || host.endsWith(".pedidosya.com.ar")) {
+                                false
+                            } else {
+                                runCatching {
+                                    context.startActivity(Intent(Intent.ACTION_VIEW, target))
+                                }
+                                true
                             }
-                        }, 2_500)
-                        if (autoExplore) {
+                        }
+
+                        override fun doUpdateVisitedHistory(
+                            view: WebView,
+                            url: String?,
+                            isReload: Boolean,
+                        ) {
+                            canGoBack = view.canGoBack()
+                            url?.let(currentOnUrlChanged.value)
+                            CookieManager.getInstance().flush()
+                        }
+
+                        override fun onPageFinished(view: WebView, finishedUrl: String) {
+                            canGoBack = view.canGoBack()
+                            currentOnUrlChanged.value(finishedUrl)
+                            currentOnPageFinished.value()
+                            CookieManager.getInstance().flush()
+                            view.evaluateJavascript(
+                                "window.__smartDealsRescan && window.__smartDealsRescan();",
+                                null,
+                            )
                             view.postDelayed({
                                 runCatching {
                                     view.evaluateJavascript(
-                                        "window.__smartDealsStartExplore && window.__smartDealsStartExplore();",
+                                        "window.__smartDealsRescan && window.__smartDealsRescan();",
                                         null,
                                     )
                                 }
-                            }, 3_500)
-                        }
-                    }
-                }
-
-                val bridgeSupported = WebViewFeature.isFeatureSupported(
-                    WebViewFeature.WEB_MESSAGE_LISTENER
-                )
-                val scriptSupported = WebViewFeature.isFeatureSupported(
-                    WebViewFeature.DOCUMENT_START_SCRIPT
-                )
-                if (bridgeSupported && scriptSupported) {
-                    WebViewCompat.addWebMessageListener(
-                        this,
-                        "SmartDealsBridge",
-                        allowedOrigins,
-                    ) { _, message, sourceOrigin, _, _ ->
-                        val host = sourceOrigin.host.orEmpty()
-                        if (host == "pedidosya.com.ar" || host.endsWith(".pedidosya.com.ar")) {
-                            val raw = message.data ?: return@addWebMessageListener
-                            val envelope = runCatching { JSONObject(raw) }.getOrNull()
-                            when (envelope?.optString("event")) {
-                                "explore_progress" -> {
-                                    currentOnExplorationProgress.value(envelope.optInt("step", 0))
-                                }
-                                "explore_complete" -> currentOnExplorationFinished.value()
-                                "explore_started" -> Unit
-                                else -> currentOnPayload.value(raw)
+                            }, 2_500)
+                            if (autoExplore) {
+                                view.postDelayed({
+                                    runCatching {
+                                        view.evaluateJavascript(
+                                            "window.__smartDealsStartExplore && window.__smartDealsStartExplore();",
+                                            null,
+                                        )
+                                    }
+                                }, 3_500)
                             }
                         }
                     }
-                    WebViewCompat.addDocumentStartJavaScript(
-                        this,
-                        captureScript,
-                        allowedOrigins,
-                    )
-                } else {
-                    currentOnUnsupported.value()
-                }
-                tag = url
-                if (freshLoad) clearCache(false)
-                loadUrl(url)
-            }
-        },
-        update = { webView ->
-            if (webView.tag != url) {
-                webView.tag = url
-                webView.loadUrl(url)
-            }
-        },
-    )
 
-    DisposableEffect(Unit) {
+                    val bridgeSupported = WebViewFeature.isFeatureSupported(
+                        WebViewFeature.WEB_MESSAGE_LISTENER
+                    )
+                    val scriptSupported = WebViewFeature.isFeatureSupported(
+                        WebViewFeature.DOCUMENT_START_SCRIPT
+                    )
+                    if (bridgeSupported && scriptSupported) {
+                        WebViewCompat.addWebMessageListener(
+                            this,
+                            "SmartDealsBridge",
+                            allowedOrigins,
+                        ) { _, message, sourceOrigin, _, _ ->
+                            val host = sourceOrigin.host.orEmpty()
+                            if (host == "pedidosya.com.ar" || host.endsWith(".pedidosya.com.ar")) {
+                                val raw = message.data ?: return@addWebMessageListener
+                                val envelope = runCatching { JSONObject(raw) }.getOrNull()
+                                when (envelope?.optString("event")) {
+                                    "explore_progress" -> {
+                                        currentOnExplorationProgress.value(envelope.optInt("step", 0))
+                                    }
+                                    "explore_complete" -> currentOnExplorationFinished.value()
+                                    "explore_started" -> Unit
+                                    else -> currentOnPayload.value(raw)
+                                }
+                            }
+                        }
+                        WebViewCompat.addDocumentStartJavaScript(
+                            this,
+                            captureScript,
+                            allowedOrigins,
+                        )
+                    } else {
+                        currentOnUnsupported.value()
+                    }
+                    tag = url
+
+                    val restored = if (!autoExplore) {
+                        PedidosYaSessionState.addStoreWebState?.let { savedState ->
+                            restoreState(Bundle(savedState))
+                        }
+                    } else {
+                        null
+                    }
+                    if (restored == null) {
+                        if (freshLoad) clearCache(false)
+                        loadUrl(url)
+                    } else {
+                        canGoBack = canGoBack()
+                    }
+                }
+            },
+            update = { webView ->
+                if (webView.tag != url) {
+                    webView.tag = url
+                    webView.loadUrl(url)
+                }
+            },
+        )
+
+        if (!autoExplore) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth(),
+                tonalElevation = 4.dp,
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    OutlinedButton(
+                        modifier = Modifier.weight(1f),
+                        enabled = canGoBack,
+                        onClick = { webViewHolder[0]?.goBack() },
+                    ) {
+                        Text("Atrás en PedidosYa")
+                    }
+                    Button(
+                        modifier = Modifier.weight(1f),
+                        onClick = { navigateToSupermarkets(webViewHolder[0]) },
+                    ) {
+                        Text("Supermercados")
+                    }
+                }
+            }
+        }
+    }
+
+    DisposableEffect(autoExplore) {
         onDispose {
             webViewHolder[0]?.apply {
+                CookieManager.getInstance().flush()
+                if (!autoExplore) {
+                    val savedState = Bundle()
+                    saveState(savedState)
+                    PedidosYaSessionState.addStoreWebState = savedState
+                }
                 stopLoading()
                 destroy()
             }
