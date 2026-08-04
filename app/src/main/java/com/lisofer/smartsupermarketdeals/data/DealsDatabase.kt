@@ -4,14 +4,18 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
-import kotlin.math.abs
-import kotlin.math.max
 
 data class Store(
     val id: Long,
     val name: String,
     val url: String,
 )
+
+enum class PromotionKind {
+    DIRECT_PERCENT,
+    MULTIBUY,
+    SECOND_UNIT,
+}
 
 data class CapturedProduct(
     val key: String,
@@ -20,25 +24,31 @@ data class CapturedProduct(
     val originalPrice: Double?,
     val advertisedDiscountPercent: Double?,
     val promoLabel: String?,
+    val promotionCategory: String?,
+    val promotionTitle: String?,
+    val effectiveDiscountPercent: Double?,
+    val promotionKind: PromotionKind?,
     val sourceUrl: String,
 )
 
-enum class DealEvidence {
-    HISTORICAL,
-    ADVERTISED,
-    BOTH,
-    BASELINE,
-}
-
-data class Deal(
+data class PromotionDeal(
+    val productKey: String,
     val productName: String,
     val storeName: String,
     val currentPrice: Double,
-    val referencePrice: Double?,
-    val discountPercent: Double,
-    val isHistoricalMinimum: Boolean,
+    val originalPrice: Double?,
     val promoLabel: String?,
-    val evidence: DealEvidence,
+    val categoryKey: String,
+    val categoryTitle: String,
+    val effectiveDiscountPercent: Double,
+    val promotionKind: PromotionKind,
+)
+
+data class PromotionGroup(
+    val key: String,
+    val title: String,
+    val effectiveDiscountPercent: Double,
+    val products: List<PromotionDeal>,
 )
 
 class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
@@ -64,6 +74,10 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                 original_price REAL,
                 advertised_discount REAL,
                 promo_label TEXT,
+                promotion_category TEXT,
+                promotion_title TEXT,
+                effective_discount REAL,
+                promotion_kind TEXT,
                 source_url TEXT,
                 captured_at INTEGER NOT NULL,
                 FOREIGN KEY(store_id) REFERENCES stores(id) ON DELETE CASCADE
@@ -71,7 +85,7 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             """.trimIndent()
         )
         db.execSQL(
-            "CREATE INDEX idx_history_product ON price_history(store_id, product_key, captured_at)"
+            "CREATE INDEX idx_current_promos ON price_history(store_id, promotion_category)"
         )
     }
 
@@ -79,6 +93,16 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         if (oldVersion < 2) {
             db.execSQL("ALTER TABLE price_history ADD COLUMN advertised_discount REAL")
             db.execSQL("ALTER TABLE price_history ADD COLUMN promo_label TEXT")
+        }
+        if (oldVersion < 3) {
+            db.execSQL("ALTER TABLE price_history ADD COLUMN promotion_category TEXT")
+            db.execSQL("ALTER TABLE price_history ADD COLUMN promotion_title TEXT")
+            db.execSQL("ALTER TABLE price_history ADD COLUMN effective_discount REAL")
+            db.execSQL("ALTER TABLE price_history ADD COLUMN promotion_kind TEXT")
+            db.execSQL(
+                "CREATE INDEX IF NOT EXISTS idx_current_promos " +
+                    "ON price_history(store_id, promotion_category)"
+            )
         }
     }
 
@@ -136,12 +160,40 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         return result
     }
 
+    /**
+     * Replaces the previous results for this store. The app intentionally keeps only
+     * the latest advertised promotions; price history is no longer used for ranking.
+     */
     fun saveScan(storeId: Long, products: Collection<CapturedProduct>) {
         if (products.isEmpty()) return
+
+        val promotions = products
+            .filter { product ->
+                product.promotionCategory != null &&
+                    product.promotionTitle != null &&
+                    product.effectiveDiscountPercent != null &&
+                    product.effectiveDiscountPercent > 0.0 &&
+                    product.promotionKind != null
+            }
+            .groupBy { it.key }
+            .mapNotNull { (_, versions) ->
+                versions.maxWithOrNull(
+                    compareBy<CapturedProduct> { it.effectiveDiscountPercent ?: 0.0 }
+                        .thenBy { if (it.promoLabel.isNullOrBlank()) 0 else 1 }
+                        .thenBy { if (it.originalPrice == null) 0 else 1 }
+                )
+            }
+
         val now = System.currentTimeMillis()
         writableDatabase.beginTransaction()
         try {
-            products.distinctBy { it.key }.forEach { product ->
+            writableDatabase.delete(
+                "price_history",
+                "store_id = ?",
+                arrayOf(storeId.toString()),
+            )
+
+            promotions.forEach { product ->
                 val values = ContentValues().apply {
                     put("store_id", storeId)
                     put("product_key", product.key)
@@ -150,10 +202,14 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                     product.originalPrice?.let { put("original_price", it) }
                     product.advertisedDiscountPercent?.let { put("advertised_discount", it) }
                     product.promoLabel?.let { put("promo_label", it) }
+                    put("promotion_category", product.promotionCategory)
+                    put("promotion_title", product.promotionTitle)
+                    put("effective_discount", product.effectiveDiscountPercent)
+                    put("promotion_kind", product.promotionKind?.name)
                     put("source_url", product.sourceUrl)
                     put("captured_at", now)
                 }
-                writableDatabase.insert("price_history", null, values)
+                writableDatabase.insertOrThrow("price_history", null, values)
             }
             writableDatabase.setTransactionSuccessful()
         } finally {
@@ -161,125 +217,69 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         }
     }
 
-    fun topDeals(limit: Int = 30): List<Deal> {
-        data class Row(
-            val storeId: Long,
-            val storeName: String,
-            val key: String,
-            val name: String,
-            val price: Double,
-            val originalPrice: Double?,
-            val advertisedDiscount: Double?,
-            val promoLabel: String?,
-            val capturedAt: Long,
-        )
-
-        val rows = mutableListOf<Row>()
-        val cutoff = System.currentTimeMillis() - HISTORY_WINDOW_MS
+    fun promotionGroups(maxPerCategory: Int = 20): List<PromotionGroup> {
+        val deals = mutableListOf<PromotionDeal>()
         readableDatabase.rawQuery(
             """
-            SELECT h.store_id, s.name, h.product_key, h.product_name,
-                   h.price, h.original_price, h.advertised_discount,
-                   h.promo_label, h.captured_at
+            SELECT h.product_key, h.product_name, s.name, h.price,
+                   h.original_price, h.promo_label, h.promotion_category,
+                   h.promotion_title, h.effective_discount, h.promotion_kind
             FROM price_history h
             JOIN stores s ON s.id = h.store_id
-            WHERE h.captured_at >= ?
-            ORDER BY h.store_id, h.product_key, h.captured_at DESC
+            WHERE h.promotion_category IS NOT NULL
+              AND h.effective_discount > 0
+              AND h.promotion_kind IS NOT NULL
+            ORDER BY h.effective_discount DESC, h.product_name ASC
             """.trimIndent(),
-            arrayOf(cutoff.toString()),
+            emptyArray(),
         ).use { cursor ->
             while (cursor.moveToNext()) {
-                rows += Row(
-                    storeId = cursor.getLong(0),
-                    storeName = cursor.getString(1),
-                    key = cursor.getString(2),
-                    name = cursor.getString(3),
-                    price = cursor.getDouble(4),
-                    originalPrice = if (cursor.isNull(5)) null else cursor.getDouble(5),
-                    advertisedDiscount = if (cursor.isNull(6)) null else cursor.getDouble(6),
-                    promoLabel = if (cursor.isNull(7)) null else cursor.getString(7),
-                    capturedAt = cursor.getLong(8),
+                val kind = runCatching {
+                    PromotionKind.valueOf(cursor.getString(9))
+                }.getOrNull() ?: continue
+
+                deals += PromotionDeal(
+                    productKey = cursor.getString(0),
+                    productName = cursor.getString(1),
+                    storeName = cursor.getString(2),
+                    currentPrice = cursor.getDouble(3),
+                    originalPrice = if (cursor.isNull(4)) null else cursor.getDouble(4),
+                    promoLabel = if (cursor.isNull(5)) null else cursor.getString(5),
+                    categoryKey = cursor.getString(6),
+                    categoryTitle = cursor.getString(7),
+                    effectiveDiscountPercent = cursor.getDouble(8),
+                    promotionKind = kind,
                 )
             }
         }
 
-        return rows.groupBy { "${it.storeId}:${it.key}" }
-            .mapNotNull { (_, history) ->
-                val latest = history.maxByOrNull { it.capturedAt } ?: return@mapNotNull null
-                val previous = history
-                    .filter { it.capturedAt < latest.capturedAt }
-                    .map { it.price }
-                val historicalReference = previous.medianOrNull()
-                    ?.takeIf { it > latest.price }
-                val inferredAdvertisedReference = latest.advertisedDiscount
-                    ?.takeIf { it in 0.5..95.0 }
-                    ?.let { latest.price / (1.0 - it / 100.0) }
-                val advertisedReference = latest.originalPrice
-                    ?.takeIf { it > latest.price }
-                    ?: inferredAdvertisedReference?.takeIf { it > latest.price }
-
-                val historicalDiscount = discount(latest.price, historicalReference)
-                val advertisedDiscount = max(
-                    discount(latest.price, advertisedReference),
-                    latest.advertisedDiscount?.coerceIn(0.0, 95.0) ?: 0.0,
-                )
-
-                val evidence = when {
-                    historicalDiscount > 0.0 && advertisedDiscount > 0.0 -> DealEvidence.BOTH
-                    historicalDiscount > 0.0 -> DealEvidence.HISTORICAL
-                    advertisedDiscount > 0.0 || latest.promoLabel != null -> DealEvidence.ADVERTISED
-                    else -> DealEvidence.BASELINE
-                }
-
-                val useHistorical = historicalDiscount >= advertisedDiscount
-                val reference = when {
-                    useHistorical && historicalReference != null -> historicalReference
-                    advertisedReference != null -> advertisedReference
-                    else -> historicalReference
-                }
-                val selectedDiscount = max(historicalDiscount, advertisedDiscount)
-                val minimumPrevious = previous.minOrNull()
-
-                Deal(
-                    productName = latest.name,
-                    storeName = latest.storeName,
-                    currentPrice = latest.price,
-                    referencePrice = reference,
-                    discountPercent = selectedDiscount,
-                    isHistoricalMinimum = minimumPrevious != null && latest.price <= minimumPrevious,
-                    promoLabel = latest.promoLabel,
-                    evidence = evidence,
+        return deals
+            .distinctBy { "${it.storeName}|${it.productKey}|${it.categoryKey}" }
+            .groupBy { it.categoryKey }
+            .map { (key, categoryDeals) ->
+                val ordered = categoryDeals
+                    .sortedWith(
+                        compareByDescending<PromotionDeal> { it.effectiveDiscountPercent }
+                            .thenBy { it.currentPrice }
+                            .thenBy { it.productName }
+                    )
+                    .take(maxPerCategory.coerceAtLeast(1))
+                PromotionGroup(
+                    key = key,
+                    title = ordered.first().categoryTitle,
+                    effectiveDiscountPercent = ordered.maxOf { it.effectiveDiscountPercent },
+                    products = ordered,
                 )
             }
             .sortedWith(
-                compareByDescending<Deal> { it.discountPercent }
-                    .thenByDescending { it.evidence != DealEvidence.BASELINE }
-                    .thenByDescending { it.isHistoricalMinimum }
-                    .thenBy { it.currentPrice }
+                compareByDescending<PromotionGroup> { it.effectiveDiscountPercent }
+                    .thenByDescending { it.products.size }
+                    .thenBy { it.title }
             )
-            .take(limit)
-    }
-
-    private fun discount(current: Double, reference: Double?): Double {
-        if (reference == null || reference <= 0.0 || current >= reference) return 0.0
-        val value = ((reference - current) / reference) * 100.0
-        return if (abs(value) < 0.05) 0.0 else value.coerceIn(0.0, 95.0)
-    }
-
-    private fun List<Double>.medianOrNull(): Double? {
-        if (isEmpty()) return null
-        val sorted = sorted()
-        val middle = sorted.size / 2
-        return if (sorted.size % 2 == 0) {
-            (sorted[middle - 1] + sorted[middle]) / 2.0
-        } else {
-            sorted[middle]
-        }
     }
 
     companion object {
         private const val DB_NAME = "smart_deals.db"
-        private const val DB_VERSION = 2
-        private const val HISTORY_WINDOW_MS = 90L * 24L * 60L * 60L * 1000L
+        private const val DB_VERSION = 3
     }
 }
