@@ -10,16 +10,11 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -40,13 +35,6 @@ private val allowedOrigins = setOf(
     "https://*.pedidosya.com.ar",
 )
 
-private const val PEDIDOSYA_STORES_URL = "https://www.pedidosya.com.ar/cadenas/tiendas"
-
-/**
- * Keeps the complete PedidosYa navigation state while the app process remains alive.
- * Cookies, IndexedDB and localStorage are already persisted by WebView; this additionally
- * preserves the back stack and sessionStorage-like page state when Compose destroys the view.
- */
 private object PedidosYaSessionState {
     var addStoreWebState: Bundle? = null
 }
@@ -68,7 +56,7 @@ private const val captureScript = """
   const sent = new Set();
   const quickHash = value => {
     let hash = 2166136261;
-    const step = Math.max(1, Math.floor(value.length / 700));
+    const step = Math.max(1, Math.floor(value.length / 900));
     for (let index = 0; index < value.length; index += step) {
       hash ^= value.charCodeAt(index);
       hash = Math.imul(hash, 16777619);
@@ -78,13 +66,13 @@ private const val captureScript = """
 
   const send = (url, body) => {
     try {
-      if (!body || body.length > 5000000) return;
+      if (!body || body.length > 6000000) return;
       const value = body.trim();
       if (!(value.startsWith('{') || value.startsWith('['))) return;
       const fingerprint = (url || '') + '|' + value.length + '|' + quickHash(value);
       if (sent.has(fingerprint)) return;
       sent.add(fingerprint);
-      if (sent.size > 1200) sent.delete(sent.values().next().value);
+      if (sent.size > 1600) sent.delete(sent.values().next().value);
       bridgePost({ url: url || '', body: value });
     } catch (_) {}
   };
@@ -135,25 +123,25 @@ private const val captureScript = """
       globals.forEach(([name, value]) => {
         if (value) sendObject(location.href + '#' + name, value);
       });
-
       document.querySelectorAll('script[type="application/json"], script#__NEXT_DATA__')
         .forEach((script, index) => {
           const text = script.textContent || '';
-          if (text.length > 2 && text.length <= 5000000) {
+          if (text.length > 2 && text.length <= 6000000) {
             send(location.href + '#json-script-' + index, text);
           }
         });
     } catch (_) {}
   };
 
-  const moneySource = '\\' + String.fromCharCode(36) + '\\s*[\\d][\\d.,]*';
-  const moneyPattern = new RegExp(moneySource);
-  const promoPattern = /((?:2\s*(?:da|do|°|º)?|segunda|segundo)\s*(?:unidad)?\s*(?:al|con|a|:)?\s*\d{1,3}(?:[.,]\d+)?\s*%?\s*(?:off|de descuento|descuento)?|\d{1,3}(?:[.,]\d+)?\s*%?\s*(?:off|de descuento|descuento)?.{0,20}?(?:2\s*(?:da|do|°|º)?|segunda|segundo)\s*(?:unidad)?|\d{1,2}\s*[x×]\s*\d{1,2}|lleva(?:ndo)?\s*\d{1,2}.{0,20}?paga(?:ndo)?\s*\d{1,2}|\d{1,3}(?:[.,]\d+)?\s*(?:%|por ciento)\s*(?:off|de descuento|descuento)?|promo|oferta|ahorr))/i;
-  const ignoredLinePattern = /^(agregar|sumar|ver más|envío|delivery|cerrar|buscar|inicio|categorías?)$/i;
+  const moneyPattern = /(?:\u0024|ARS\s*)\s*\d[\d.]*(?:,\d+)?/i;
+  const promoPattern = /(?:-?\s*\d{1,3}(?:[.,]\d+)?\s*%\s*(?:off|dto|de descuento)?|\d{1,2}\s*[x×]\s*\d{1,2}|lleva(?:ndo)?\s*\d{1,2}.{0,30}?paga(?:ndo)?\s*\d{1,2}|(?:2\s*(?:da|do|°|º)?|segunda|segundo)\s*(?:unidad)?\s*(?:al|con|a|:)?\s*\d{1,3}(?:[.,]\d+)?\s*%?|promo(?:cion)?|oferta|descuento|ahorr(?:a|o|á))/i;
+  const ignoredLinePattern = /^(agregar|sumar|ver más|envío|delivery|cerrar|buscar|inicio|categorías?|productos?)$/i;
 
   const textOf = element => (element && (element.innerText || element.textContent) || '')
     .replace(/\s+/g, ' ')
     .trim();
+
+  const moneyMatches = text => text.match(new RegExp(moneyPattern.source, 'gi')) || [];
 
   const isCrossed = element => {
     if (!element) return false;
@@ -168,18 +156,18 @@ private const val captureScript = """
 
   const preferredContainer = priceElement => {
     const preferred = priceElement.closest(
-      'article, li, [role="listitem"], [data-testid*="product"], [class*="product"], [class*="Product"], [class*="item-card"]'
+      'article, li, [role="listitem"], [data-testid*="product"], [class*="product"], [class*="Product"], [class*="item-card"], [class*="ItemCard"]'
     );
     if (preferred) {
       const text = textOf(preferred);
-      if (text.length >= 8 && text.length <= 1400) return preferred;
+      if (text.length >= 8 && text.length <= 1800) return preferred;
     }
 
     let node = priceElement;
-    for (let depth = 0; depth < 7 && node; depth += 1, node = node.parentElement) {
+    for (let depth = 0; depth < 8 && node; depth += 1, node = node.parentElement) {
       const text = textOf(node);
-      const prices = text.match(new RegExp(moneySource, 'g')) || [];
-      if (text.length >= 8 && text.length <= 750 && prices.length >= 1 && prices.length <= 6) {
+      const prices = moneyMatches(text);
+      if (text.length >= 8 && text.length <= 1100 && prices.length >= 1 && prices.length <= 8) {
         return node;
       }
     }
@@ -192,7 +180,7 @@ private const val captureScript = """
       '[data-testid*="name"], [class*="name"], [class*="Name"], h1, h2, h3, h4, strong'
     );
     const preferredText = textOf(preferred);
-    if (preferredText.length >= 3 && preferredText.length <= 180 && !moneyPattern.test(preferredText)) {
+    if (preferredText.length >= 3 && preferredText.length <= 200 && !moneyPattern.test(preferredText)) {
       return preferredText;
     }
 
@@ -202,7 +190,7 @@ private const val captureScript = """
       .filter(Boolean);
     return lines.find(line =>
       line.length >= 3 &&
-      line.length <= 180 &&
+      line.length <= 200 &&
       !moneyPattern.test(line) &&
       !promoPattern.test(line) &&
       !ignoredLinePattern.test(line)
@@ -211,14 +199,26 @@ private const val captureScript = """
 
   const scanVisibleCatalog = () => {
     try {
-      const leaves = Array.from(document.querySelectorAll('body *'))
-        .filter(element => element.children.length === 0 && moneyPattern.test(textOf(element)))
-        .slice(0, 3000);
-      const products = new Map();
+      const candidateNodes = new Set();
+      document.querySelectorAll(
+        'article, li, [role="listitem"], [data-testid*="product"], [class*="product"], [class*="Product"], [class*="item-card"], [class*="ItemCard"]'
+      ).forEach(node => {
+        const text = textOf(node);
+        if (text.length >= 8 && text.length <= 1800 && moneyPattern.test(text)) {
+          candidateNodes.add(node);
+        }
+      });
 
-      leaves.forEach(priceLeaf => {
-        const container = preferredContainer(priceLeaf);
-        if (!container) return;
+      Array.from(document.querySelectorAll('body *'))
+        .filter(element => element.children.length === 0 && moneyPattern.test(textOf(element)))
+        .slice(0, 3500)
+        .forEach(priceLeaf => {
+          const container = preferredContainer(priceLeaf);
+          if (container) candidateNodes.add(container);
+        });
+
+      const products = new Map();
+      Array.from(candidateNodes).slice(0, 3500).forEach(container => {
         const name = findName(container);
         if (name.length < 3) return;
 
@@ -226,12 +226,13 @@ private const val captureScript = """
           .filter(element => element.children.length === 0 && moneyPattern.test(textOf(element)));
         if (moneyPattern.test(textOf(container)) && priceLeaves.length === 0) priceLeaves.push(container);
 
-        const currentElement = priceLeaves.find(element => !isCrossed(element)) || priceLeaf;
+        const nonCrossed = priceLeaves.filter(element => !isCrossed(element));
+        const currentElement = nonCrossed[nonCrossed.length - 1] || priceLeaves[priceLeaves.length - 1];
         const originalElement = priceLeaves.find(element => isCrossed(element));
-        const price = (textOf(currentElement).match(moneyPattern) || [])[0];
-        const originalPrice = originalElement
-          ? (textOf(originalElement).match(moneyPattern) || [])[0]
-          : null;
+        const currentMatches = currentElement ? moneyMatches(textOf(currentElement)) : [];
+        const originalMatches = originalElement ? moneyMatches(textOf(originalElement)) : [];
+        const price = currentMatches[currentMatches.length - 1];
+        const originalPrice = originalMatches[0] || null;
         if (!price) return;
 
         const fullText = textOf(container);
@@ -239,16 +240,18 @@ private const val captureScript = """
         const link = container.closest('a') || container.querySelector('a');
         const id = container.getAttribute('data-product-id') ||
           container.getAttribute('data-id') ||
+          container.getAttribute('data-testid') ||
           (link && link.getAttribute('href')) ||
           name;
-        const key = String(id).slice(0, 260) + '|' + name + '|' + price;
+        const key = String(id).slice(0, 280) + '|' + name + '|' + price;
 
         products.set(key, {
-          id: String(id).slice(0, 260),
+          id: String(id).slice(0, 280),
           name,
           price,
           originalPrice,
           promotionLabel: promoMatch ? promoMatch[0] : null,
+          promotionText: promoMatch ? promoMatch[0] : null,
           source: 'visible-dom',
         });
       });
@@ -270,7 +273,7 @@ private const val captureScript = """
     scanTimer = setTimeout(() => {
       emitEmbeddedJson();
       scanVisibleCatalog();
-    }, 500);
+    }, 450);
   };
   window.__smartDealsRescan = rescan;
 
@@ -284,9 +287,9 @@ private const val captureScript = """
     let previousHeight = 0;
 
     sendEvent('explore_started');
-    await sleep(1200);
+    await sleep(1600);
 
-    for (let index = 0; index < 48; index += 1) {
+    for (let index = 0; index < 60; index += 1) {
       emitEmbeddedJson();
       scanVisibleCatalog();
       step += 1;
@@ -302,37 +305,37 @@ private const val captureScript = """
       if (currentY >= maxY - 8) {
         stableBottomPasses = documentHeight === previousHeight ? stableBottomPasses + 1 : 0;
         previousHeight = documentHeight;
-        if (stableBottomPasses >= 3) break;
-        await sleep(900);
+        if (stableBottomPasses >= 4) break;
+        await sleep(1100);
       } else {
-        const increment = Math.max(480, Math.round(window.innerHeight * 0.72));
+        const increment = Math.max(420, Math.round(window.innerHeight * 0.65));
         window.scrollTo(0, Math.min(maxY, currentY + increment));
-        await sleep(650);
+        await sleep(700);
       }
     }
 
     const horizontalScrollers = Array.from(document.querySelectorAll('body *'))
       .filter(element =>
-        element.scrollWidth > element.clientWidth + 160 &&
-        element.clientWidth > 180 &&
+        element.scrollWidth > element.clientWidth + 120 &&
+        element.clientWidth > 160 &&
         element.clientHeight < window.innerHeight * 0.9
       )
-      .slice(0, 24);
+      .slice(0, 30);
 
     for (const scroller of horizontalScrollers) {
       const maxX = Math.max(0, scroller.scrollWidth - scroller.clientWidth);
-      for (const ratio of [0, 0.5, 1]) {
+      for (const ratio of [0, 0.33, 0.66, 1]) {
         scroller.scrollLeft = Math.round(maxX * ratio);
-        await sleep(350);
+        await sleep(380);
         scanVisibleCatalog();
       }
     }
 
     window.scrollTo(0, originalY);
-    await sleep(700);
+    await sleep(900);
     emitEmbeddedJson();
-    scanVisibleCatalog();
-    sendEvent('explore_complete', { steps: step });
+    const visibleCount = scanVisibleCatalog();
+    sendEvent('explore_complete', { steps: step, visibleCount, url: location.href });
     window.__smartDealsExploring = false;
   };
 
@@ -342,39 +345,12 @@ private const val captureScript = """
     characterData: true,
   });
   window.addEventListener('load', rescan);
-  setTimeout(rescan, 1000);
-  setTimeout(rescan, 3000);
-  setTimeout(rescan, 7000);
+  setTimeout(rescan, 900);
+  setTimeout(rescan, 2500);
+  setTimeout(rescan, 6000);
+  setTimeout(rescan, 12000);
 })();
 """
-
-private fun navigateToSupermarkets(webView: WebView?) {
-    webView ?: return
-    val script = """
-        (() => {
-          const normalize = value => (value || '')
-            .toLowerCase()
-            .normalize('NFD')
-            .replace(/[\u0300-\u036f]/g, '')
-            .replace(/\s+/g, ' ')
-            .trim();
-          const elements = Array.from(document.querySelectorAll('a, button, [role="button"]'));
-          const exact = elements.find(element => /^supermercados?$/.test(normalize(element.innerText || element.textContent)));
-          const related = elements.find(element => /supermercad|mercado|tiendas/.test(normalize(element.innerText || element.textContent)));
-          const target = exact || related;
-          if (target) {
-            target.click();
-            return 'clicked';
-          }
-          return 'not-found';
-        })();
-    """.trimIndent()
-    webView.evaluateJavascript(script) { result ->
-        if (result.contains("not-found")) {
-            webView.loadUrl(PEDIDOSYA_STORES_URL)
-        }
-    }
-}
 
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
@@ -481,7 +457,7 @@ fun PedidosYaWebView(
                                             null,
                                         )
                                     }
-                                }, 3_500)
+                                }, 4_000)
                             }
                         }
                     }
@@ -545,32 +521,14 @@ fun PedidosYaWebView(
             },
         )
 
-        if (!autoExplore) {
-            Surface(
+        if (!autoExplore && canGoBack) {
+            TextButton(
                 modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth(),
-                tonalElevation = 4.dp,
+                    .align(Alignment.TopStart)
+                    .padding(4.dp),
+                onClick = { webViewHolder[0]?.goBack() },
             ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    OutlinedButton(
-                        modifier = Modifier.weight(1f),
-                        enabled = canGoBack,
-                        onClick = { webViewHolder[0]?.goBack() },
-                    ) {
-                        Text("Atrás en PedidosYa")
-                    }
-                    Button(
-                        modifier = Modifier.weight(1f),
-                        onClick = { navigateToSupermarkets(webViewHolder[0]) },
-                    ) {
-                        Text("Supermercados")
-                    }
-                }
+                Text("← Atrás")
             }
         }
     }
