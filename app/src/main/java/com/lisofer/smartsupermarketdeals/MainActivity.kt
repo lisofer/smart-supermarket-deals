@@ -58,6 +58,8 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 private const val PEDIDOSYA_HOME = "https://www.pedidosya.com.ar/"
+private const val SCAN_TIMEOUT_MS = 330_000L
+private const val POST_EXPLORATION_SETTLE_MS = 5_000L
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -425,7 +427,8 @@ private fun ScanScreen(
     }
 
     LaunchedEffect(index) {
-        delay(75_000)
+        delay(SCAN_TIMEOUT_MS)
+        status = "Se alcanzó el límite de seguridad; guardando todo lo encontrado…"
         finishCurrentStore(timeout = true)
     }
 
@@ -433,11 +436,11 @@ private fun ScanScreen(
         if (!explorationComplete) return@LaunchedEffect
         val promoCount = products.values.count { it.effectiveDiscountPercent != null }
         if (promoCount == 0) {
-            status = "El primer recorrido terminó sin descuentos; sigo esperando datos…"
+            status = "El barrido terminó sin descuentos; sigo esperando datos internos…"
             return@LaunchedEffect
         }
-        status = "Terminando de reunir promociones…"
-        delay(2_500)
+        status = "El catálogo dejó de aportar ofertas nuevas; consolidando resultados…"
+        delay(POST_EXPLORATION_SETTLE_MS)
         finishCurrentStore(timeout = false)
     }
 
@@ -462,8 +465,8 @@ private fun ScanScreen(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(status)
                         Text(
-                            "No finaliza ni borra resultados por una lectura vacía. Revisa datos " +
-                                "internos, tarjetas visibles y precios tachados.",
+                            "El barrido recorre la página completa, categorías, listas internas, " +
+                                "carruseles y respuestas de datos antes de finalizar.",
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
@@ -504,11 +507,11 @@ private fun ScanScreen(
                 onPageFinished = {
                     pageFinishedToken += 1
                     explorationComplete = false
-                    status = "Página cargada; preparando recorrido…"
+                    status = "Página cargada; preparando barrido exhaustivo…"
                 },
                 onExplorationProgress = { step ->
                     val promoCount = products.values.count { it.effectiveDiscountPercent != null }
-                    status = "Recorriendo catálogo: paso $step · $promoCount promociones"
+                    status = "Barrido exhaustivo: paso $step · $promoCount promociones"
                 },
                 onExplorationFinished = { explorationComplete = true },
                 onUnsupportedWebView = { unsupported = true },
