@@ -4,6 +4,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
+import kotlin.math.abs
 import kotlin.math.max
 
 data class Store(
@@ -17,8 +18,17 @@ data class CapturedProduct(
     val name: String,
     val price: Double,
     val originalPrice: Double?,
+    val advertisedDiscountPercent: Double?,
+    val promoLabel: String?,
     val sourceUrl: String,
 )
+
+enum class DealEvidence {
+    HISTORICAL,
+    ADVERTISED,
+    BOTH,
+    BASELINE,
+}
 
 data class Deal(
     val productName: String,
@@ -27,6 +37,8 @@ data class Deal(
     val referencePrice: Double?,
     val discountPercent: Double,
     val isHistoricalMinimum: Boolean,
+    val promoLabel: String?,
+    val evidence: DealEvidence,
 )
 
 class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VERSION) {
@@ -50,6 +62,8 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                 product_name TEXT NOT NULL,
                 price REAL NOT NULL,
                 original_price REAL,
+                advertised_discount REAL,
+                promo_label TEXT,
                 source_url TEXT,
                 captured_at INTEGER NOT NULL,
                 FOREIGN KEY(store_id) REFERENCES stores(id) ON DELETE CASCADE
@@ -62,9 +76,10 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        db.execSQL("DROP TABLE IF EXISTS price_history")
-        db.execSQL("DROP TABLE IF EXISTS stores")
-        onCreate(db)
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE price_history ADD COLUMN advertised_discount REAL")
+            db.execSQL("ALTER TABLE price_history ADD COLUMN promo_label TEXT")
+        }
     }
 
     fun addStore(name: String, url: String): Long {
@@ -133,6 +148,8 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                     put("product_name", product.name)
                     put("price", product.price)
                     product.originalPrice?.let { put("original_price", it) }
+                    product.advertisedDiscountPercent?.let { put("advertised_discount", it) }
+                    product.promoLabel?.let { put("promo_label", it) }
                     put("source_url", product.sourceUrl)
                     put("captured_at", now)
                 }
@@ -152,6 +169,8 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
             val name: String,
             val price: Double,
             val originalPrice: Double?,
+            val advertisedDiscount: Double?,
+            val promoLabel: String?,
             val capturedAt: Long,
         )
 
@@ -160,7 +179,8 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
         readableDatabase.rawQuery(
             """
             SELECT h.store_id, s.name, h.product_key, h.product_name,
-                   h.price, h.original_price, h.captured_at
+                   h.price, h.original_price, h.advertised_discount,
+                   h.promo_label, h.captured_at
             FROM price_history h
             JOIN stores s ON s.id = h.store_id
             WHERE h.captured_at >= ?
@@ -176,7 +196,9 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                     name = cursor.getString(3),
                     price = cursor.getDouble(4),
                     originalPrice = if (cursor.isNull(5)) null else cursor.getDouble(5),
-                    capturedAt = cursor.getLong(6),
+                    advertisedDiscount = if (cursor.isNull(6)) null else cursor.getDouble(6),
+                    promoLabel = if (cursor.isNull(7)) null else cursor.getString(7),
+                    capturedAt = cursor.getLong(8),
                 )
             }
         }
@@ -188,28 +210,60 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                     .filter { it.capturedAt < latest.capturedAt }
                     .map { it.price }
                 val historicalReference = previous.medianOrNull()
-                val advertisedReference = latest.originalPrice?.takeIf { it > latest.price }
-                val reference = historicalReference ?: advertisedReference
-                val discount = reference
-                    ?.takeIf { it > 0.0 }
-                    ?.let { ((it - latest.price) / it) * 100.0 }
-                    ?: 0.0
-                val minimum = history.minOfOrNull { it.price } ?: latest.price
+                    ?.takeIf { it > latest.price }
+                val inferredAdvertisedReference = latest.advertisedDiscount
+                    ?.takeIf { it in 0.5..95.0 }
+                    ?.let { latest.price / (1.0 - it / 100.0) }
+                val advertisedReference = latest.originalPrice
+                    ?.takeIf { it > latest.price }
+                    ?: inferredAdvertisedReference?.takeIf { it > latest.price }
+
+                val historicalDiscount = discount(latest.price, historicalReference)
+                val advertisedDiscount = max(
+                    discount(latest.price, advertisedReference),
+                    latest.advertisedDiscount?.coerceIn(0.0, 95.0) ?: 0.0,
+                )
+
+                val evidence = when {
+                    historicalDiscount > 0.0 && advertisedDiscount > 0.0 -> DealEvidence.BOTH
+                    historicalDiscount > 0.0 -> DealEvidence.HISTORICAL
+                    advertisedDiscount > 0.0 || latest.promoLabel != null -> DealEvidence.ADVERTISED
+                    else -> DealEvidence.BASELINE
+                }
+
+                val useHistorical = historicalDiscount >= advertisedDiscount
+                val reference = when {
+                    useHistorical && historicalReference != null -> historicalReference
+                    advertisedReference != null -> advertisedReference
+                    else -> historicalReference
+                }
+                val selectedDiscount = max(historicalDiscount, advertisedDiscount)
+                val minimumPrevious = previous.minOrNull()
+
                 Deal(
                     productName = latest.name,
                     storeName = latest.storeName,
                     currentPrice = latest.price,
                     referencePrice = reference,
-                    discountPercent = max(0.0, discount),
-                    isHistoricalMinimum = latest.price <= minimum,
+                    discountPercent = selectedDiscount,
+                    isHistoricalMinimum = minimumPrevious != null && latest.price <= minimumPrevious,
+                    promoLabel = latest.promoLabel,
+                    evidence = evidence,
                 )
             }
             .sortedWith(
                 compareByDescending<Deal> { it.discountPercent }
+                    .thenByDescending { it.evidence != DealEvidence.BASELINE }
                     .thenByDescending { it.isHistoricalMinimum }
                     .thenBy { it.currentPrice }
             )
             .take(limit)
+    }
+
+    private fun discount(current: Double, reference: Double?): Double {
+        if (reference == null || reference <= 0.0 || current >= reference) return 0.0
+        val value = ((reference - current) / reference) * 100.0
+        return if (abs(value) < 0.05) 0.0 else value.coerceIn(0.0, 95.0)
     }
 
     private fun List<Double>.medianOrNull(): Double? {
@@ -225,7 +279,7 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
 
     companion object {
         private const val DB_NAME = "smart_deals.db"
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
         private const val HISTORY_WINDOW_MS = 90L * 24L * 60L * 60L * 1000L
     }
 }
