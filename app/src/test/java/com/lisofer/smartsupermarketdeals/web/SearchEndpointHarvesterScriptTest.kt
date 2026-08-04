@@ -9,7 +9,10 @@ class SearchEndpointHarvesterScriptTest {
     fun `endpoint harvester is valid modern JavaScript`() {
         val script = Files.createTempFile("smart-deals-endpoint-harvester", ".js")
         try {
-            Files.writeString(script, searchEndpointHarvesterScript)
+            Files.write(
+                script,
+                searchEndpointHarvesterScript.toByteArray(Charsets.UTF_8),
+            )
             val process = ProcessBuilder("node", "--check", script.toString())
                 .redirectErrorStream(true)
                 .start()
