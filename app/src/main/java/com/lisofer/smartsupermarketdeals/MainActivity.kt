@@ -30,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -79,6 +80,7 @@ private fun SmartDealsApp(database: DealsDatabase) {
     var screen by remember { mutableStateOf(Screen.HOME) }
     var stores by remember { mutableStateOf(emptyList<Store>()) }
     var promotionGroups by remember { mutableStateOf(emptyList<PromotionGroup>()) }
+    var scanNotice by remember { mutableStateOf<String?>(null) }
 
     suspend fun refresh() {
         val snapshot = withContext(Dispatchers.IO) {
@@ -94,8 +96,15 @@ private fun SmartDealsApp(database: DealsDatabase) {
         Screen.HOME -> HomeScreen(
             stores = stores,
             promotionGroups = promotionGroups,
-            onAddStore = { screen = Screen.ADD_STORE },
-            onAnalyze = { screen = Screen.SCAN },
+            scanNotice = scanNotice,
+            onAddStore = {
+                scanNotice = null
+                screen = Screen.ADD_STORE
+            },
+            onAnalyze = {
+                scanNotice = null
+                screen = Screen.SCAN
+            },
             onDeleteStore = { store ->
                 scope.launch {
                     withContext(Dispatchers.IO) { database.deleteStore(store.id) }
@@ -118,9 +127,10 @@ private fun SmartDealsApp(database: DealsDatabase) {
         Screen.SCAN -> ScanScreen(
             stores = stores,
             database = database,
-            onFinished = {
+            onFinished = { notice ->
                 scope.launch {
                     refresh()
+                    scanNotice = notice
                     screen = Screen.HOME
                 }
             },
@@ -133,6 +143,7 @@ private fun SmartDealsApp(database: DealsDatabase) {
 private fun HomeScreen(
     stores: List<Store>,
     promotionGroups: List<PromotionGroup>,
+    scanNotice: String?,
     onAddStore: () -> Unit,
     onAnalyze: () -> Unit,
     onDeleteStore: (Store) -> Unit,
@@ -164,6 +175,10 @@ private fun HomeScreen(
                 )
             }
 
+            scanNotice?.let { notice ->
+                item { InfoCard(notice) }
+            }
+
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -185,15 +200,13 @@ private fun HomeScreen(
                 }
             }
 
-            item {
-                Text("Tiendas (${stores.size})", fontWeight = FontWeight.SemiBold)
-            }
+            item { Text("Tiendas (${stores.size})", fontWeight = FontWeight.SemiBold) }
 
             if (stores.isEmpty()) {
                 item {
                     InfoCard(
-                        "Primero agregá una tienda. Solo tenés que abrirla una vez en " +
-                            "PedidosYa y guardarla; no se cargan productos manualmente."
+                        "Primero agregá una tienda. Entrá manualmente a Supermercados en PedidosYa, " +
+                            "abrí la sucursal y guardala."
                     )
                 }
             } else {
@@ -205,11 +218,7 @@ private fun HomeScreen(
                         ) {
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(store.name, fontWeight = FontWeight.SemiBold)
-                                Text(
-                                    store.url,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    maxLines = 2,
-                                )
+                                Text(store.url, style = MaterialTheme.typography.bodySmall, maxLines = 2)
                             }
                             OutlinedButton(onClick = { onDeleteStore(store) }) {
                                 Text("Quitar")
@@ -227,8 +236,8 @@ private fun HomeScreen(
             if (promotionGroups.isEmpty()) {
                 item {
                     InfoCard(
-                        "Todavía no hay promociones cuantificables. La búsqueda muestra solamente " +
-                            "descuentos publicados: porcentajes, 2x1, 3x2 y segunda unidad."
+                        "Todavía no hay promociones cuantificables. La app busca porcentajes, " +
+                            "2x1, 3x2, lleva N paga M y descuentos en la segunda unidad."
                     )
                 }
             } else {
@@ -244,9 +253,7 @@ private fun HomeScreen(
                             FilterChip(
                                 selected = group.key == selectedGroup?.key,
                                 onClick = { selectedCategory = group.key },
-                                label = {
-                                    Text("${group.title} (${group.products.size})")
-                                },
+                                label = { Text("${group.title} (${group.products.size})") },
                             )
                         }
                     }
@@ -268,9 +275,7 @@ private fun HomeScreen(
                     }
                     items(
                         items = group.products,
-                        key = { deal ->
-                            "${deal.storeName}|${deal.productKey}|${deal.categoryKey}"
-                        },
+                        key = { deal -> "${deal.storeName}|${deal.productKey}|${deal.categoryKey}" },
                     ) { deal ->
                         PromotionCard(deal)
                     }
@@ -300,8 +305,8 @@ private fun AddStoreScreen(
             Column(modifier = Modifier.padding(12.dp)) {
                 Text("Agregar tienda", style = MaterialTheme.typography.titleLarge)
                 Text(
-                    "Ingresá tu dirección si PedidosYa la pide y abrí el supermercado. " +
-                        "Cuando estés dentro de la tienda, tocá Guardar.",
+                    "Cargá tu dirección, entrá manualmente a Supermercados y abrí la tienda. " +
+                        "Usá la flecha pequeña de arriba o el botón Atrás del teléfono para navegar.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 if (capturedCount > 0) {
@@ -314,7 +319,7 @@ private fun AddStoreScreen(
                     )
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onBack) { Text("Volver") }
+                    OutlinedButton(onClick = onBack) { Text("Volver a la app") }
                     Button(
                         enabled = currentUrl.contains("pedidosya.com.ar"),
                         onClick = { onSave(cleanTitle(title), currentUrl) },
@@ -344,11 +349,11 @@ private fun AddStoreScreen(
 private fun ScanScreen(
     stores: List<Store>,
     database: DealsDatabase,
-    onFinished: () -> Unit,
+    onFinished: (String?) -> Unit,
     onCancel: () -> Unit,
 ) {
     if (stores.isEmpty()) {
-        LaunchedEffect(Unit) { onFinished() }
+        LaunchedEffect(Unit) { onFinished("No hay tiendas guardadas para analizar.") }
         return
     }
 
@@ -359,6 +364,8 @@ private fun ScanScreen(
     var saved by remember(index) { mutableStateOf(false) }
     var unsupported by remember { mutableStateOf(false) }
     var status by remember(index) { mutableStateOf("Abriendo tienda…") }
+    var totalPromotions by remember { mutableIntStateOf(0) }
+    val failures = remember { mutableStateListOf<String>() }
     val products = remember(index) { mutableStateMapOf<String, CapturedProduct>() }
     val store = stores[index]
 
@@ -367,34 +374,71 @@ private fun ScanScreen(
         activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
-    suspend fun finishCurrentStore() {
-        if (saved) return
-        saved = true
-        val promotionCount = products.values.count { it.effectiveDiscountPercent != null }
-        status = "Guardando $promotionCount promociones…"
-        val snapshot = products.values.toList()
-        withContext(Dispatchers.IO) { database.saveScan(store.id, snapshot) }
-
+    suspend fun advanceOrFinish(newTotal: Int) {
         if (index == stores.lastIndex) {
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            onFinished()
+            val notice = when {
+                newTotal > 0 && failures.isEmpty() ->
+                    "Búsqueda terminada: se guardaron $newTotal promociones."
+                newTotal > 0 ->
+                    "Se guardaron $newTotal promociones. Sin resultados nuevos en: " +
+                        failures.joinToString().plus(". No se borraron sus resultados anteriores.")
+                else ->
+                    "No se detectó ninguna promoción nueva. Verificá que la URL guardada sea la " +
+                        "página interna de un supermercado; los resultados anteriores no se borraron."
+            }
+            onFinished(notice)
         } else {
             index += 1
         }
     }
 
-    LaunchedEffect(index, pageFinishedToken) {
-        if (pageFinishedToken == 0) return@LaunchedEffect
-        // Safety timeout in case the website blocks the completion event.
-        delay(55_000)
-        finishCurrentStore()
+    suspend fun finishCurrentStore(timeout: Boolean) {
+        if (saved) return
+        val promotionalProducts = products.values.filter {
+            it.effectiveDiscountPercent != null &&
+                it.promotionCategory != null &&
+                it.promotionKind != null
+        }
+
+        if (promotionalProducts.isEmpty() && !timeout) {
+            status = "Todavía no encontré descuentos; sigo leyendo la página…"
+            return
+        }
+
+        saved = true
+        if (promotionalProducts.isEmpty()) {
+            failures += store.name
+            status = "Sin promociones detectadas; no reemplazo los resultados anteriores."
+            delay(900)
+            advanceOrFinish(totalPromotions)
+            return
+        }
+
+        status = "Guardando ${promotionalProducts.size} promociones…"
+        withContext(Dispatchers.IO) {
+            database.saveScan(store.id, promotionalProducts)
+        }
+        val newTotal = totalPromotions + promotionalProducts.size
+        totalPromotions = newTotal
+        advanceOrFinish(newTotal)
     }
 
-    LaunchedEffect(index, explorationComplete) {
+    LaunchedEffect(index) {
+        delay(75_000)
+        finishCurrentStore(timeout = true)
+    }
+
+    LaunchedEffect(index, explorationComplete, products.size) {
         if (!explorationComplete) return@LaunchedEffect
+        val promoCount = products.values.count { it.effectiveDiscountPercent != null }
+        if (promoCount == 0) {
+            status = "El primer recorrido terminó sin descuentos; sigo esperando datos…"
+            return@LaunchedEffect
+        }
         status = "Terminando de reunir promociones…"
-        delay(1_500)
-        finishCurrentStore()
+        delay(2_500)
+        finishCurrentStore(timeout = false)
     }
 
     Scaffold { padding ->
@@ -418,16 +462,14 @@ private fun ScanScreen(
                     Column(modifier = Modifier.weight(1f)) {
                         Text(status)
                         Text(
-                            "La app recorre el catálogo completo y conserva la lectura más " +
-                                "detallada de cada producto.",
+                            "No finaliza ni borra resultados por una lectura vacía. Revisa datos " +
+                                "internos, tarjetas visibles y precios tachados.",
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
                     OutlinedButton(onClick = {
                         scope.launch {
-                            activity?.window?.clearFlags(
-                                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-                            )
+                            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                             onCancel()
                         }
                     }) {
@@ -456,24 +498,19 @@ private fun ScanScreen(
                             incoming,
                         )
                     }
-                    val promoCount = products.values.count {
-                        it.effectiveDiscountPercent != null
-                    }
+                    val promoCount = products.values.count { it.effectiveDiscountPercent != null }
                     status = "${products.size} productos · $promoCount promociones"
                 },
                 onPageFinished = {
                     pageFinishedToken += 1
-                    status = "Preparando recorrido automático…"
+                    explorationComplete = false
+                    status = "Página cargada; preparando recorrido…"
                 },
                 onExplorationProgress = { step ->
-                    val promoCount = products.values.count {
-                        it.effectiveDiscountPercent != null
-                    }
+                    val promoCount = products.values.count { it.effectiveDiscountPercent != null }
                     status = "Recorriendo catálogo: paso $step · $promoCount promociones"
                 },
-                onExplorationFinished = {
-                    explorationComplete = true
-                },
+                onExplorationFinished = { explorationComplete = true },
                 onUnsupportedWebView = { unsupported = true },
             )
         }
@@ -512,8 +549,7 @@ private fun PromotionCard(deal: PromotionDeal) {
                     "Ahorro efectivo: ${formatPercent(deal.effectiveDiscountPercent)}% " +
                         "cumpliendo la cantidad de la promoción"
                 PromotionKind.SECOND_UNIT ->
-                    "Ahorro efectivo: ${formatPercent(deal.effectiveDiscountPercent)}% " +
-                        "sobre dos unidades"
+                    "Ahorro efectivo: ${formatPercent(deal.effectiveDiscountPercent)}% sobre dos unidades"
             }
             Text(explanation, style = MaterialTheme.typography.bodySmall)
 
@@ -530,9 +566,7 @@ private fun PromotionCard(deal: PromotionDeal) {
 @Composable
 private fun InfoCard(text: String) {
     Card(modifier = Modifier.fillMaxWidth()) {
-        Box(modifier = Modifier.padding(14.dp)) {
-            Text(text)
-        }
+        Box(modifier = Modifier.padding(14.dp)) { Text(text) }
     }
 }
 
