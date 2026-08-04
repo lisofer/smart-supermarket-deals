@@ -1,0 +1,1 @@
+# Reglas específicas del prototipo.
