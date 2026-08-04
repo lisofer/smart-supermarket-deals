@@ -193,6 +193,11 @@ fun PedidosYaWebView(
                             exhaustiveCatalogScript,
                             allowedOrigins,
                         )
+                        WebViewCompat.addDocumentStartJavaScript(
+                            this,
+                            searchEndpointHarvesterScript,
+                            allowedOrigins,
+                        )
                     } else {
                         currentOnUnsupported.value()
                     }
