@@ -1,15 +1,16 @@
 package com.lisofer.smartsupermarketdeals.web
 
-/**
- * Captures only bounded JSON responses. Large response parsing previously happened on WebView's
- * main thread and could trigger Android's "app isn't responding" dialog.
- */
+/** Captures bounded JSON only while browsing manually; endpoint scans use compact batches. */
 internal const val rawJsonCaptureScript = """
+
 (() => {
   if (window.__smartDealsRawCaptureInstalled) return;
   window.__smartDealsRawCaptureInstalled = true;
 
   const MAX_JSON_CHARS = 420000;
+  const endpointMode = () => Boolean(
+    window.__smartDealsEndpointMode || Number(window.__smartDealsHarvestTransportDepth || 0) > 0
+  );
   const post = value => {
     try {
       if (window.SmartDealsBridge && window.SmartDealsBridge.postMessage) {
@@ -35,7 +36,7 @@ internal const val rawJsonCaptureScript = """
   };
   const send = (url, body) => {
     try {
-      if (!body || body.length > MAX_JSON_CHARS) return;
+      if (endpointMode() || !body || body.length > MAX_JSON_CHARS) return;
       const value = body.trim();
       if (!(value.startsWith('{') || value.startsWith('[')) || !useful(value)) return;
       const fingerprint = String(url || '') + '|' + value.length + '|' + quickHash(value);
@@ -53,36 +54,39 @@ internal const val rawJsonCaptureScript = """
   };
 
   const previousFetch = window.fetch;
-  if (previousFetch && !previousFetch.__smartDealsRawV10Wrapped) {
+  if (previousFetch && !previousFetch.__smartDealsRawV12Wrapped) {
     const wrappedFetch = async function(...args) {
+      const skipCapture = endpointMode();
       const response = await previousFetch.apply(this, args);
       try {
         const type = response.headers.get('content-type') || '';
-        if (type.includes('json') && contentLengthAllowed(response)) {
+        if (!skipCapture && type.includes('json') && contentLengthAllowed(response)) {
           response.clone().text().then(text => send(response.url, text)).catch(() => {});
         }
       } catch (_) {}
       return response;
     };
-    wrappedFetch.__smartDealsRawV10Wrapped = true;
+    wrappedFetch.__smartDealsRawV12Wrapped = true;
     window.fetch = wrappedFetch;
   }
 
   const previousOpen = XMLHttpRequest.prototype.open;
-  if (previousOpen && !previousOpen.__smartDealsRawV10Wrapped) {
+  if (previousOpen && !previousOpen.__smartDealsRawV12Wrapped) {
     const wrappedOpen = function(method, url, ...rest) {
       this.__smartDealsUrl = url;
+      this.__smartDealsSkipRawCapture = endpointMode();
       return previousOpen.call(this, method, url, ...rest);
     };
-    wrappedOpen.__smartDealsRawV10Wrapped = true;
+    wrappedOpen.__smartDealsRawV12Wrapped = true;
     XMLHttpRequest.prototype.open = wrappedOpen;
   }
 
   const previousSend = XMLHttpRequest.prototype.send;
-  if (previousSend && !previousSend.__smartDealsRawV10Wrapped) {
+  if (previousSend && !previousSend.__smartDealsRawV12Wrapped) {
     const wrappedSend = function(...args) {
       this.addEventListener('load', function() {
         try {
+          if (this.__smartDealsSkipRawCapture || endpointMode()) return;
           const type = this.getResponseHeader('content-type') || '';
           const length = Number(this.getResponseHeader('content-length') || 0);
           if (type.includes('json') && (!length || length <= MAX_JSON_CHARS) &&
@@ -93,12 +97,13 @@ internal const val rawJsonCaptureScript = """
       }, { once: true });
       return previousSend.apply(this, args);
     };
-    wrappedSend.__smartDealsRawV10Wrapped = true;
+    wrappedSend.__smartDealsRawV12Wrapped = true;
     XMLHttpRequest.prototype.send = wrappedSend;
   }
 
   const emitEmbeddedJson = () => {
     try {
+      if (endpointMode()) return;
       const globals = [
         ['__NEXT_DATA__', window.__NEXT_DATA__],
         ['__PRELOADED_STATE__', window.__PRELOADED_STATE__],
@@ -123,8 +128,6 @@ internal const val rawJsonCaptureScript = """
   };
 
   window.__smartDealsEmitEmbeddedJson = emitEmbeddedJson;
-  window.addEventListener('load', emitEmbeddedJson, { once: true });
-  setTimeout(emitEmbeddedJson, 900);
-  setTimeout(emitEmbeddedJson, 3200);
 })();
+
 """

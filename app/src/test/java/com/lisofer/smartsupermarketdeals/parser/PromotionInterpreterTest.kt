@@ -1,9 +1,11 @@
 package com.lisofer.smartsupermarketdeals.parser
 
+import com.lisofer.smartsupermarketdeals.data.PromotionEvidence
 import com.lisofer.smartsupermarketdeals.data.PromotionKind
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -30,9 +32,7 @@ class PromotionInterpreterTest {
 
     @Test
     fun twoForOneLabelIsRecognized() {
-        val promo = PromotionInterpreter.fromObject(
-            JSONObject("""{"badge":"2x1"}""")
-        )
+        val promo = PromotionInterpreter.fromObject(JSONObject("""{"badge":"2x1"}"""))
         assertNotNull(promo)
         assertEquals(PromotionKind.MULTIBUY, promo!!.normalized.kind)
         assertEquals(50.0, promo.normalized.effectivePercent, 0.01)
@@ -48,6 +48,14 @@ class PromotionInterpreterTest {
         assertNotNull(promo)
         assertEquals(PromotionKind.DIRECT_PERCENT, promo!!.normalized.kind)
         assertEquals(15.0, promo.normalized.effectivePercent, 0.01)
+    }
+
+    @Test
+    fun bareNutritionalPercentageIsNotDiscount() {
+        val promo = PromotionInterpreter.fromObject(
+            JSONObject("""{"name":"Chocolate 50% cacao","description":"Contiene 50% cacao"}""")
+        )
+        assertNull(promo)
     }
 
     @Test
@@ -143,5 +151,147 @@ class PromotionInterpreterTest {
         assertNotNull(promo)
         assertEquals(PromotionKind.DIRECT_PERCENT, promo!!.normalized.kind)
         assertEquals(50.0, promo.normalized.effectivePercent, 0.01)
+    }
+
+    @Test
+    fun pageLevelDirectPercentageIsNotAppliedToEveryProduct() {
+        val body =
+            """
+            {
+              "promotion":{"type":"PERCENTAGE","value":50},
+              "products":[
+                {"id":"regular-1","name":"Producto regular","price":1000}
+              ]
+            }
+            """.trimIndent()
+        val envelope = JSONObject()
+            .put("url", "https://www.pedidosya.com.ar/store/test")
+            .put("body", body)
+            .toString()
+
+        val product = ProductJsonExtractor.extract(envelope)
+            .first { it.name == "Producto regular" }
+        assertNull(product.promotionKind)
+        assertNull(product.promotionEvidence)
+    }
+
+    @Test
+    fun inheritedSecondUnitSectionCanApplyToItsProducts() {
+        val body =
+            """
+            {
+              "sections":[
+                {
+                  "title":"2DA UNIDAD 50% OFF",
+                  "commercial":{
+                    "mechanic":{"type":"SECOND_UNIT"},
+                    "benefit":{"type":"PERCENTAGE","value":50}
+                  },
+                  "products":[
+                    {"id":"second-1","name":"Yerba de sección","price":2400}
+                  ]
+                }
+              ]
+            }
+            """.trimIndent()
+        val envelope = JSONObject()
+            .put("url", "https://www.pedidosya.com.ar/store/test")
+            .put("body", body)
+            .toString()
+
+        val product = ProductJsonExtractor.extract(envelope)
+            .first { it.name == "Yerba de sección" }
+        assertEquals(PromotionKind.SECOND_UNIT, product.promotionKind)
+        assertEquals(25.0, product.effectiveDiscountPercent!!, 0.01)
+        assertEquals(PromotionEvidence.INHERITED_SECTION, product.promotionEvidence)
+    }
+
+    @Test
+    fun inheritedPayloadSecondUnitIsKeptWeakAndCorrect() {
+        val body =
+            """
+            {
+              "products":[
+                {
+                  "id":"payload-second-1",
+                  "name":"Aceite con segunda unidad",
+                  "price":3000,
+                  "source":"search-endpoint-v12",
+                  "__smartDealsSectionPromotion":{
+                    "__smartDealsInherited":true,
+                    "label":"2DA UNIDAD 60% OFF",
+                    "commercial":{
+                      "mechanic":{"type":"SECOND_UNIT"},
+                      "benefit":{"type":"PERCENTAGE","value":60}
+                    }
+                  }
+                }
+              ]
+            }
+            """.trimIndent()
+        val envelope = JSONObject()
+            .put("url", "https://www.pedidosya.com.ar/store/test")
+            .put("body", body)
+            .toString()
+
+        val product = ProductJsonExtractor.extract(envelope)
+            .first { it.name == "Aceite con segunda unidad" }
+        assertEquals(PromotionKind.SECOND_UNIT, product.promotionKind)
+        assertEquals(30.0, product.effectiveDiscountPercent!!, 0.01)
+        assertEquals(PromotionEvidence.INHERITED_SECTION, product.promotionEvidence)
+    }
+
+    @Test
+    fun secondUnitMechanicDoesNotBorrowCacaoPercentage() {
+        val body =
+            """
+            {
+              "products":[
+                {
+                  "id":"cacao-1",
+                  "name":"Chocolate 50% cacao",
+                  "price":1800,
+                  "description":"Chocolate elaborado con 50% cacao",
+                  "commercial":{"mechanic":{"type":"SECOND_UNIT"}}
+                }
+              ]
+            }
+            """.trimIndent()
+        val envelope = JSONObject()
+            .put("url", "https://www.pedidosya.com.ar/store/test")
+            .put("body", body)
+            .toString()
+
+        val product = ProductJsonExtractor.extract(envelope)
+            .first { it.name == "Chocolate 50% cacao" }
+        assertNull(product.promotionKind)
+        assertNull(product.promotionEvidence)
+    }
+
+    @Test
+    fun publishedOldPriceIsStrongEvidence() {
+        val body =
+            """
+            {
+              "products":[
+                {
+                  "id":"price-pair-1",
+                  "name":"Producto con precio tachado",
+                  "price":800,
+                  "originalPrice":1000
+                }
+              ]
+            }
+            """.trimIndent()
+        val envelope = JSONObject()
+            .put("url", "https://www.pedidosya.com.ar/store/test")
+            .put("body", body)
+            .toString()
+
+        val product = ProductJsonExtractor.extract(envelope)
+            .first { it.name == "Producto con precio tachado" }
+        assertEquals(PromotionKind.DIRECT_PERCENT, product.promotionKind)
+        assertEquals(20.0, product.effectiveDiscountPercent!!, 0.01)
+        assertEquals(PromotionEvidence.PRICE_PAIR, product.promotionEvidence)
     }
 }

@@ -17,6 +17,13 @@ enum class PromotionKind {
     SECOND_UNIT,
 }
 
+enum class PromotionEvidence {
+    PRICE_PAIR,
+    PRODUCT_TEXT,
+    PRODUCT_STRUCTURE,
+    INHERITED_SECTION,
+}
+
 data class CapturedProduct(
     val key: String,
     val name: String,
@@ -29,6 +36,7 @@ data class CapturedProduct(
     val effectiveDiscountPercent: Double?,
     val promotionKind: PromotionKind?,
     val sourceUrl: String,
+    val promotionEvidence: PromotionEvidence? = null,
 )
 
 data class PromotionDeal(
@@ -161,26 +169,26 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
     }
 
     /**
-     * Replaces the previous results for this store. The app intentionally keeps only
-     * the latest advertised promotions; price history is no longer used for ranking.
+     * Replaces the previous results for this store. An empty, successfully completed scan clears
+     * stale promotions instead of keeping false positives from an older version.
      */
     fun saveScan(storeId: Long, products: Collection<CapturedProduct>) {
-        if (products.isEmpty()) return
-
         val promotions = products
             .filter { product ->
                 product.promotionCategory != null &&
                     product.promotionTitle != null &&
                     product.effectiveDiscountPercent != null &&
                     product.effectiveDiscountPercent > 0.0 &&
-                    product.promotionKind != null
+                    product.promotionKind != null &&
+                    product.promotionEvidence != null
             }
             .groupBy { "${it.key}|${it.promotionCategory}" }
             .mapNotNull { (_, versions) ->
                 versions.maxWithOrNull(
-                    compareBy<CapturedProduct> { it.effectiveDiscountPercent ?: 0.0 }
-                        .thenBy { if (it.promoLabel.isNullOrBlank()) 0 else 1 }
+                    compareBy<CapturedProduct> { evidenceScore(it.promotionEvidence) }
                         .thenBy { if (it.originalPrice == null) 0 else 1 }
+                        .thenBy { if (it.promoLabel.isNullOrBlank()) 0 else 1 }
+                        .thenBy { it.effectiveDiscountPercent ?: 0.0 }
                 )
             }
 
@@ -274,6 +282,14 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                     .thenByDescending { it.products.size }
                     .thenBy { it.title }
             )
+    }
+
+    private fun evidenceScore(evidence: PromotionEvidence?): Int = when (evidence) {
+        PromotionEvidence.PRICE_PAIR -> 5
+        PromotionEvidence.PRODUCT_TEXT -> 4
+        PromotionEvidence.PRODUCT_STRUCTURE -> 3
+        PromotionEvidence.INHERITED_SECTION -> 1
+        null -> 0
     }
 
     companion object {
