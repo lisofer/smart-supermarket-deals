@@ -61,6 +61,7 @@ fun PedidosYaWebView(
     val currentOnExplorationProgress = rememberUpdatedState(onExplorationProgress)
     val currentOnExplorationFinished = rememberUpdatedState(onExplorationFinished)
     val currentOnUnsupported = rememberUpdatedState(onUnsupportedWebView)
+    val currentRootUrl = rememberUpdatedState(url)
     val webViewHolder = remember { arrayOfNulls<WebView>(1) }
     var canGoBack by remember { mutableStateOf(false) }
 
@@ -78,11 +79,7 @@ fun PedidosYaWebView(
                     settings.domStorageEnabled = true
                     settings.databaseEnabled = true
                     settings.setSupportMultipleWindows(false)
-                    settings.cacheMode = if (freshLoad) {
-                        WebSettings.LOAD_NO_CACHE
-                    } else {
-                        WebSettings.LOAD_DEFAULT
-                    }
+                    settings.cacheMode = WebSettings.LOAD_DEFAULT
                     CookieManager.getInstance().setAcceptCookie(true)
                     CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
 
@@ -125,39 +122,32 @@ fun PedidosYaWebView(
                             currentOnPageFinished.value()
                             CookieManager.getInstance().flush()
 
-                            view.evaluateJavascript(
-                                "window.__smartDealsEmitEmbeddedJson && " +
+                            val rootLiteral = JSONObject.quote(currentRootUrl.value)
+                            val initialScript =
+                                "window.__smartDealsSetRoot && window.__smartDealsSetRoot($rootLiteral); " +
+                                    "window.__smartDealsEmitEmbeddedJson && " +
                                     "window.__smartDealsEmitEmbeddedJson(); " +
                                     "window.__smartDealsPromotionDomScan && " +
                                     "window.__smartDealsPromotionDomScan(); " +
                                     "window.__smartDealsExhaustiveRescan && " +
-                                    "window.__smartDealsExhaustiveRescan();",
-                                null,
-                            )
+                                    "window.__smartDealsExhaustiveRescan();"
+                            view.evaluateJavascript(initialScript, null)
                             view.postDelayed({
-                                runCatching {
-                                    view.evaluateJavascript(
-                                        "window.__smartDealsEmitEmbeddedJson && " +
-                                            "window.__smartDealsEmitEmbeddedJson(); " +
-                                            "window.__smartDealsPromotionDomScan && " +
-                                            "window.__smartDealsPromotionDomScan(); " +
-                                            "window.__smartDealsExhaustiveRescan && " +
-                                            "window.__smartDealsExhaustiveRescan();",
-                                        null,
-                                    )
-                                }
-                            }, 2_500)
+                                runCatching { view.evaluateJavascript(initialScript, null) }
+                            }, 1_800)
 
                             if (autoExplore) {
                                 view.postDelayed({
                                     runCatching {
                                         view.evaluateJavascript(
-                                            "window.__smartDealsStartExplore && " +
+                                            "window.__smartDealsSetRoot && " +
+                                                "window.__smartDealsSetRoot($rootLiteral); " +
+                                                "window.__smartDealsStartExplore && " +
                                                 "window.__smartDealsStartExplore();",
                                             null,
                                         )
                                     }
-                                }, 4_000)
+                                }, 2_700)
                             }
                         }
                     }
@@ -183,7 +173,7 @@ fun PedidosYaWebView(
                                         currentOnExplorationProgress.value(envelope.optInt("step", 0))
                                     }
                                     "explore_complete" -> currentOnExplorationFinished.value()
-                                    "explore_started" -> Unit
+                                    "explore_started", "catalog_routes", "route_change" -> Unit
                                     else -> currentOnPayload.value(raw)
                                 }
                             }
@@ -226,6 +216,7 @@ fun PedidosYaWebView(
             update = { webView ->
                 if (webView.tag != url) {
                     webView.tag = url
+                    if (freshLoad) webView.clearCache(false)
                     webView.loadUrl(url)
                 }
             },

@@ -1,11 +1,15 @@
 package com.lisofer.smartsupermarketdeals.web
 
-/** Captures ordinary network and embedded JSON. Oversized responses are handled by the exhaustive layer. */
+/**
+ * Captures only bounded JSON responses. Large response parsing previously happened on WebView's
+ * main thread and could trigger Android's "app isn't responding" dialog.
+ */
 internal const val rawJsonCaptureScript = """
 (() => {
   if (window.__smartDealsRawCaptureInstalled) return;
   window.__smartDealsRawCaptureInstalled = true;
 
+  const MAX_JSON_CHARS = 420000;
   const post = value => {
     try {
       if (window.SmartDealsBridge && window.SmartDealsBridge.postMessage) {
@@ -14,9 +18,15 @@ internal const val rawJsonCaptureScript = """
     } catch (_) {}
   };
   const sent = new Set();
+  const useful = value => {
+    const sample = value.length <= 180000
+      ? value
+      : value.slice(0, 90000) + value.slice(-90000);
+    return /(?:product|item|price|pricing|promo|discount|descuento|benefit|offer|commercial)/i.test(sample);
+  };
   const quickHash = value => {
     let hash = 2166136261;
-    const step = Math.max(1, Math.floor(value.length / 1200));
+    const step = Math.max(1, Math.floor(value.length / 800));
     for (let index = 0; index < value.length; index += step) {
       hash ^= value.charCodeAt(index);
       hash = Math.imul(hash, 16777619);
@@ -25,59 +35,65 @@ internal const val rawJsonCaptureScript = """
   };
   const send = (url, body) => {
     try {
-      if (!body || body.length > 6000000) return;
+      if (!body || body.length > MAX_JSON_CHARS) return;
       const value = body.trim();
-      if (!(value.startsWith('{') || value.startsWith('['))) return;
+      if (!(value.startsWith('{') || value.startsWith('[')) || !useful(value)) return;
       const fingerprint = String(url || '') + '|' + value.length + '|' + quickHash(value);
       if (sent.has(fingerprint)) return;
       sent.add(fingerprint);
-      if (sent.size > 4000) sent.delete(sent.values().next().value);
+      if (sent.size > 900) sent.delete(sent.values().next().value);
       post({ url: url || '', body: value });
     } catch (_) {}
   };
-  const sendObject = (url, value) => {
-    try { send(url, JSON.stringify(value)); } catch (_) {}
+  const contentLengthAllowed = response => {
+    try {
+      const raw = response.headers.get('content-length');
+      return !raw || Number(raw) <= MAX_JSON_CHARS;
+    } catch (_) { return true; }
   };
 
   const previousFetch = window.fetch;
-  if (previousFetch && !previousFetch.__smartDealsRawWrapped) {
+  if (previousFetch && !previousFetch.__smartDealsRawV10Wrapped) {
     const wrappedFetch = async function(...args) {
       const response = await previousFetch.apply(this, args);
       try {
-        const clone = response.clone();
-        const type = clone.headers.get('content-type') || '';
-        if (type.includes('json')) clone.text().then(text => send(response.url, text));
+        const type = response.headers.get('content-type') || '';
+        if (type.includes('json') && contentLengthAllowed(response)) {
+          response.clone().text().then(text => send(response.url, text)).catch(() => {});
+        }
       } catch (_) {}
       return response;
     };
-    wrappedFetch.__smartDealsRawWrapped = true;
+    wrappedFetch.__smartDealsRawV10Wrapped = true;
     window.fetch = wrappedFetch;
   }
 
   const previousOpen = XMLHttpRequest.prototype.open;
-  if (previousOpen && !previousOpen.__smartDealsRawWrapped) {
+  if (previousOpen && !previousOpen.__smartDealsRawV10Wrapped) {
     const wrappedOpen = function(method, url, ...rest) {
       this.__smartDealsUrl = url;
       return previousOpen.call(this, method, url, ...rest);
     };
-    wrappedOpen.__smartDealsRawWrapped = true;
+    wrappedOpen.__smartDealsRawV10Wrapped = true;
     XMLHttpRequest.prototype.open = wrappedOpen;
   }
 
   const previousSend = XMLHttpRequest.prototype.send;
-  if (previousSend && !previousSend.__smartDealsRawWrapped) {
+  if (previousSend && !previousSend.__smartDealsRawV10Wrapped) {
     const wrappedSend = function(...args) {
       this.addEventListener('load', function() {
         try {
           const type = this.getResponseHeader('content-type') || '';
-          if (type.includes('json') && (!this.responseType || this.responseType === 'text')) {
+          const length = Number(this.getResponseHeader('content-length') || 0);
+          if (type.includes('json') && (!length || length <= MAX_JSON_CHARS) &&
+              (!this.responseType || this.responseType === 'text')) {
             send(this.responseURL || this.__smartDealsUrl || '', this.responseText || '');
           }
         } catch (_) {}
-      });
+      }, { once: true });
       return previousSend.apply(this, args);
     };
-    wrappedSend.__smartDealsRawWrapped = true;
+    wrappedSend.__smartDealsRawV10Wrapped = true;
     XMLHttpRequest.prototype.send = wrappedSend;
   }
 
@@ -91,33 +107,24 @@ internal const val rawJsonCaptureScript = """
         ['__NUXT__', window.__NUXT__],
       ];
       globals.forEach(([name, value]) => {
-        if (value) sendObject(location.href + '#' + name, value);
+        if (!value) return;
+        try {
+          const text = JSON.stringify(value);
+          send(location.href + '#' + name, text);
+        } catch (_) {}
       });
-      document.querySelectorAll(
+      Array.from(document.querySelectorAll(
         'script[type="application/json"], script[type="application/ld+json"], script#__NEXT_DATA__'
-      ).forEach((script, index) => {
+      )).slice(0, 40).forEach((script, index) => {
         const text = script.textContent || '';
-        if (text.length > 2 && text.length <= 6000000) {
-          send(location.href + '#json-script-' + index, text);
-        }
+        send(location.href + '#json-script-' + index, text);
       });
     } catch (_) {}
   };
 
-  let timer = null;
-  const rescan = () => {
-    clearTimeout(timer);
-    timer = setTimeout(emitEmbeddedJson, 500);
-  };
   window.__smartDealsEmitEmbeddedJson = emitEmbeddedJson;
-  new MutationObserver(rescan).observe(document.documentElement, {
-    subtree: true,
-    childList: true,
-    characterData: false,
-  });
-  window.addEventListener('load', emitEmbeddedJson);
-  setTimeout(emitEmbeddedJson, 700);
-  setTimeout(emitEmbeddedJson, 2500);
-  setTimeout(emitEmbeddedJson, 6500);
+  window.addEventListener('load', emitEmbeddedJson, { once: true });
+  setTimeout(emitEmbeddedJson, 900);
+  setTimeout(emitEmbeddedJson, 3200);
 })();
 """
