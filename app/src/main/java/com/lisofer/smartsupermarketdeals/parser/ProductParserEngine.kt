@@ -20,8 +20,11 @@ internal class ProductParserEngine(private val sourceUrl: String) {
         if (node == null || depth > MAX_DEPTH || output.size >= MAX_PRODUCTS) return
         when (node) {
             is JSONObject -> walkObject(node, depth, inheritedPromotion)
-            is JSONArray -> for (index in 0 until node.length()) {
-                walk(node.opt(index), depth + 1, inheritedPromotion)
+            is JSONArray -> {
+                for (index in 0 until node.length()) {
+                    walk(node.opt(index), depth + 1, inheritedPromotion)
+                    if (output.size >= MAX_PRODUCTS) break
+                }
             }
         }
     }
@@ -32,74 +35,106 @@ internal class ProductParserEngine(private val sourceUrl: String) {
         inheritedPromotion: PromotionContext?,
     ) {
         val ownPromotion = PromotionInterpreter.fromObject(json)
-        val promotionForProduct = ownPromotion ?: inheritedPromotion
-        candidate(json, promotionForProduct)?.let { incoming ->
+        candidate(json, ownPromotion ?: inheritedPromotion)?.let { incoming ->
             output[incoming.key] = ProductJsonExtractor.prefer(output[incoming.key], incoming)
         }
 
-        val propagateOwn = ownPromotion != null &&
-            ownPromotion.unambiguous &&
-            hasProductCollection(json)
+        val promotionToPropagate = when {
+            ownPromotion != null && ownPromotion.unambiguous && hasProductCollection(json) -> ownPromotion
+            inheritedPromotion != null -> inheritedPromotion
+            else -> null
+        }
+
         val keys = json.keys()
         while (keys.hasNext()) {
             val key = keys.next()
+            val value = json.opt(key)
             val childPromotion = when {
-                propagateOwn && (isProductCollectionKey(key) || isWrapperKey(key)) -> ownPromotion
-                inheritedPromotion != null -> inheritedPromotion
+                ownPromotion != null && ownPromotion.unambiguous &&
+                    (isProductCollectionKey(key) || isWrapperKey(key)) -> ownPromotion
+                promotionToPropagate != null &&
+                    (isProductCollectionKey(key) || isWrapperKey(key) || inheritedPromotion != null) ->
+                    promotionToPropagate
                 else -> null
             }
-            walk(json.opt(key), depth + 1, childPromotion)
+            walk(value, depth + 1, childPromotion)
         }
     }
 
-    private fun candidate(json: JSONObject, promotion: PromotionContext?): CapturedProduct? {
+    private fun candidate(json: JSONObject, suppliedPromotion: PromotionContext?): CapturedProduct? {
         val name = firstText(json, NAME_KEYS)
             ?.replace(Regex("\\s+"), " ")
             ?.trim()
-            ?.takeIf { it.length in 3..220 }
+            ?.takeIf { it.length in 3..240 }
             ?: return null
+
         val price = firstNumber(json, PRICE_KEYS)
             ?.takeIf { it in MIN_PRICE..MAX_PRICE }
             ?: return null
+
         val originalPrice = firstNumber(json, ORIGINAL_PRICE_KEYS)
             ?.takeIf { it > price && it <= MAX_PRICE }
+
+        // The v0.5 parser was effective because it searched below the product object.
+        // Keep that breadth, but let PromotionInterpreter enforce strict commercial syntax.
+        val deepPromotion = if (suppliedPromotion == null) {
+            PromotionInterpreter.fromProductSubtree(json)
+        } else {
+            null
+        }
+        val promotion = suppliedPromotion ?: deepPromotion
         val normalizedPromotion = promotion?.normalized
             ?: originalPrice?.let { PromotionInterpreter.fromPrices(price, it) }
 
-        val explicitId = firstText(json, ID_KEYS)?.trim()?.takeIf(String::isNotBlank)
+        val strongId = firstText(json, STRONG_ID_KEYS)?.trim()?.takeIf(String::isNotBlank)
+        val localId = json.opt("id").let(::textValue)?.trim()?.takeIf(String::isNotBlank)
+        val explicitId = strongId ?: localId
         val imageIdentity = firstText(json, IMAGE_KEYS)?.trim().orEmpty()
         val variantIdentity = firstText(json, VARIANT_KEYS)?.trim().orEmpty()
         val linkIdentity = firstText(json, LINK_KEYS)?.trim().orEmpty()
         val brandIdentity = firstText(json, BRAND_KEYS)?.trim().orEmpty()
         val presentationIdentity = firstText(json, PRESENTATION_KEYS)?.trim().orEmpty()
         val sourceMarker = json.optString("source")
+
         val hasProductSignal = sourceMarker == "visible-dom" ||
-            explicitId != null || IMAGE_KEYS.any(json::has) ||
-            CATEGORY_KEYS.any(json::has) || SKU_KEYS.any(json::has) ||
-            originalPrice != null || normalizedPromotion != null ||
+            explicitId != null ||
+            IMAGE_KEYS.any(json::has) ||
+            CATEGORY_KEYS.any(json::has) ||
+            STRONG_ID_KEYS.any(json::has) ||
+            originalPrice != null ||
+            normalizedPromotion != null ||
             json.keys().asSequence().any { key ->
                 key.contains("product", ignoreCase = true) ||
                     key.contains("item", ignoreCase = true) ||
-                    key.contains("sku", ignoreCase = true)
+                    key.contains("sku", ignoreCase = true) ||
+                    key.contains("catalog", ignoreCase = true)
             }
         if (!hasProductSignal) return null
 
-        val identity = listOf(
+        val stableIdentity = listOf(
             explicitId.orEmpty(),
             normalizeName(name),
+            normalizeName(brandIdentity),
+            normalizeName(variantIdentity),
+            normalizeName(presentationIdentity),
             imageIdentity,
-            variantIdentity,
             linkIdentity,
-            brandIdentity,
-            presentationIdentity,
-            price.toString(),
         ).joinToString("|")
+        val fallbackIdentity = if (stableIdentity.replace("|", "").isBlank()) {
+            "${normalizeName(name)}|$price"
+        } else {
+            stableIdentity
+        }
+        val categoryIdentity = normalizedPromotion?.categoryKey.orEmpty()
         val advertised = normalizedPromotion
-            ?.takeIf { it.kind == PromotionKind.DIRECT_PERCENT || it.kind == PromotionKind.SECOND_UNIT }
+            ?.takeIf {
+                it.kind == PromotionKind.DIRECT_PERCENT ||
+                    it.kind == PromotionKind.SECOND_UNIT
+            }
             ?.advertisedPercent
 
         return CapturedProduct(
-            key = "product:${sha256(identity)}",
+            key = "product:${sha256("$fallbackIdentity|$categoryIdentity")}",
             name = name,
             price = price,
             originalPrice = originalPrice,
@@ -118,14 +153,18 @@ internal class ProductParserEngine(private val sourceUrl: String) {
         while (keys.hasNext()) {
             val key = keys.next()
             val value = json.opt(key)
-            if (isProductCollectionKey(key) && (value is JSONArray || value is JSONObject)) return true
+            if (isProductCollectionKey(key) && (value is JSONArray || value is JSONObject)) {
+                return true
+            }
             if (isWrapperKey(key) && value is JSONObject) {
                 val nested = value.keys()
                 while (nested.hasNext()) {
                     val nestedKey = nested.next()
                     val nestedValue = value.opt(nestedKey)
                     if (isProductCollectionKey(nestedKey) &&
-                        (nestedValue is JSONArray || nestedValue is JSONObject)) return true
+                        (nestedValue is JSONArray || nestedValue is JSONObject)) {
+                        return true
+                    }
                 }
             }
         }
@@ -137,20 +176,28 @@ internal class ProductParserEngine(private val sourceUrl: String) {
         return n == "products" || n == "items" || n == "productlist" ||
             n == "product_list" || n == "catalogitems" || n == "catalog_items" ||
             n == "results" || n == "entries" || n == "elements" ||
-            n.contains("products") || n.contains("catalogitem") || n.contains("product_list")
+            n == "skus" || n == "variants" || n == "children" ||
+            n.contains("products") || n.contains("catalogitem") ||
+            n.contains("product_list") || n.contains("productlist")
     }
 
     private fun isWrapperKey(key: String): Boolean {
         val n = key.lowercase(Locale.ROOT)
         return n in WRAPPER_KEYS || n.contains("section") || n.contains("shelf") ||
-            n.contains("carousel") || n.contains("collection") || n.contains("group")
+            n.contains("carousel") || n.contains("collection") || n.contains("group") ||
+            n.contains("catalog") || n.contains("aisle") || n.contains("category")
     }
 
     private fun firstText(json: JSONObject, keys: List<String>): String? {
+        return firstTextRecursive(json, keys, depth = 0)
+    }
+
+    private fun firstTextRecursive(json: JSONObject, keys: List<String>, depth: Int): String? {
         keys.forEach { key -> textValue(json.opt(key))?.let { return it } }
-        TEXT_CONTAINERS.forEach { containerKey ->
+        if (depth >= LOCAL_SEARCH_DEPTH) return null
+        LOCAL_TEXT_CONTAINERS.forEach { containerKey ->
             val container = json.optJSONObject(containerKey) ?: return@forEach
-            keys.forEach { key -> textValue(container.opt(key))?.let { return it } }
+            firstTextRecursive(container, keys, depth + 1)?.let { return it }
         }
         return null
     }
@@ -165,12 +212,19 @@ internal class ProductParserEngine(private val sourceUrl: String) {
     }
 
     private fun firstNumber(json: JSONObject, keys: List<String>): Double? {
+        return firstNumberRecursive(json, keys, depth = 0)
+    }
+
+    private fun firstNumberRecursive(json: JSONObject, keys: List<String>, depth: Int): Double? {
         keys.forEach { key -> numberValue(json.opt(key))?.let { return it } }
-        PRICE_CONTAINERS.forEach { containerKey ->
+        if (depth >= LOCAL_SEARCH_DEPTH) return null
+        LOCAL_PRICE_CONTAINERS.forEach { containerKey ->
             val container = json.optJSONObject(containerKey) ?: return@forEach
-            keys.forEach { key -> numberValue(container.opt(key))?.let { return it } }
-            if (keys === PRICE_KEYS) NUMBER_VALUES.forEach { key ->
-                numberValue(container.opt(key))?.let { return it }
+            firstNumberRecursive(container, keys, depth + 1)?.let { return it }
+            if (keys === PRICE_KEYS) {
+                NUMBER_VALUES.forEach { key ->
+                    numberValue(container.opt(key))?.let { return it }
+                }
             }
         }
         return null
@@ -178,8 +232,8 @@ internal class ProductParserEngine(private val sourceUrl: String) {
 
     private fun numberValue(value: Any?): Double? {
         parseNumber(value)?.let { return it }
-        if (value is JSONObject) NUMBER_VALUES.forEach { key ->
-            parseNumber(value.opt(key))?.let { return it }
+        if (value is JSONObject) {
+            NUMBER_VALUES.forEach { key -> parseNumber(value.opt(key))?.let { return it } }
         }
         return null
     }
@@ -191,11 +245,15 @@ internal class ProductParserEngine(private val sourceUrl: String) {
     }
 
     private fun localizedNumber(raw: String): Double? {
-        val cleaned = raw.replace("$", "").replace("ARS", "", ignoreCase = true)
-            .filter { it.isDigit() || it == '.' || it == ',' || it == '-' }.trim()
+        val cleaned = raw
+            .replace("$", "")
+            .replace("ARS", "", ignoreCase = true)
+            .filter { it.isDigit() || it == '.' || it == ',' || it == '-' }
+            .trim()
         if (cleaned.isBlank()) return null
         val normalized = when {
-            cleaned.contains('.') && cleaned.contains(',') -> cleaned.replace(".", "").replace(',', '.')
+            cleaned.contains('.') && cleaned.contains(',') ->
+                cleaned.replace(".", "").replace(',', '.')
             cleaned.contains(',') -> cleaned.replace(',', '.')
             cleaned.matches(Regex("-?\\d{1,3}(\\.\\d{3})+")) -> cleaned.replace(".", "")
             else -> cleaned
@@ -206,16 +264,20 @@ internal class ProductParserEngine(private val sourceUrl: String) {
     private fun normalizeName(value: String): String {
         return Normalizer.normalize(value.lowercase(Locale.ROOT), Normalizer.Form.NFD)
             .replace(Regex("\\p{M}+"), "")
-            .replace(Regex("[^a-z0-9]+"), "-").trim('-')
+            .replace(Regex("[^a-z0-9]+"), "-")
+            .trim('-')
     }
 
     private fun sha256(value: String): String {
-        return MessageDigest.getInstance("SHA-256").digest(value.toByteArray())
-            .joinToString("") { "%02x".format(it) }.take(24)
+        return MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray())
+            .joinToString("") { "%02x".format(it) }
+            .take(24)
     }
 
     private val NAME_KEYS = listOf(
-        "productName", "product_name", "displayName", "display_name", "name", "title",
+        "productName", "product_name", "displayName", "display_name",
+        "itemName", "item_name", "name", "title",
     )
     private val PRICE_KEYS = listOf(
         "price", "currentPrice", "current_price", "salePrice", "sale_price",
@@ -231,30 +293,52 @@ internal class ProductParserEngine(private val sourceUrl: String) {
         "strike_price", "crossedPrice", "crossed_price", "retailPrice", "retail_price",
         "priceBeforeDiscount", "price_before_discount",
     )
-    private val ID_KEYS = listOf("productId", "product_id", "sku", "barcode", "gtin", "ean", "id")
-    private val SKU_KEYS = listOf("productId", "product_id", "sku", "barcode", "gtin", "ean")
-    private val IMAGE_KEYS = listOf("image", "imageUrl", "image_url", "picture", "thumbnail")
+    private val STRONG_ID_KEYS = listOf(
+        "productId", "product_id", "itemId", "item_id", "sku", "skuId", "sku_id",
+        "barcode", "gtin", "ean",
+    )
+    private val IMAGE_KEYS = listOf(
+        "image", "imageUrl", "image_url", "picture", "thumbnail", "photo", "photoUrl",
+    )
     private val VARIANT_KEYS = listOf(
         "variant", "variantName", "variant_name", "size", "presentation", "pack", "unit",
     )
-    private val BRAND_KEYS = listOf("brand", "brandName", "brand_name", "manufacturer")
+    private val BRAND_KEYS = listOf(
+        "brand", "brandName", "brand_name", "manufacturer",
+    )
     private val PRESENTATION_KEYS = listOf(
-        "presentation", "package", "packageName", "package_name", "measurement", "weight", "volume",
+        "presentation", "package", "packageName", "package_name", "measurement",
+        "weight", "volume", "description",
     )
-    private val LINK_KEYS = listOf("url", "href", "deeplink", "deepLink", "deep_link")
-    private val CATEGORY_KEYS = listOf("category", "categoryId", "category_id", "section", "aisle")
-    private val TEXT_CONTAINERS = listOf("product", "item", "content", "data")
-    private val TEXT_VALUES = listOf("name", "title", "label", "text", "description", "value", "url")
-    private val PRICE_CONTAINERS = listOf(
-        "pricing", "priceInfo", "price_info", "prices", "commercial", "sale", "product", "item",
+    private val LINK_KEYS = listOf(
+        "url", "href", "deeplink", "deepLink", "deep_link", "productUrl", "product_url",
     )
-    private val NUMBER_VALUES = listOf("amount", "value", "price", "current", "total", "units")
-    private val WRAPPER_KEYS = setOf("data", "content", "payload", "result", "results", "body", "response")
+    private val CATEGORY_KEYS = listOf(
+        "category", "categoryId", "category_id", "section", "aisle", "department",
+    )
+    private val LOCAL_TEXT_CONTAINERS = listOf(
+        "product", "item", "content", "data", "details", "attributes", "metadata",
+    )
+    private val LOCAL_PRICE_CONTAINERS = listOf(
+        "pricing", "priceInfo", "price_info", "prices", "commercial", "sale",
+        "product", "item", "content", "data", "details",
+    )
+    private val TEXT_VALUES = listOf(
+        "name", "title", "label", "text", "description", "value", "url",
+    )
+    private val NUMBER_VALUES = listOf(
+        "amount", "value", "price", "current", "total", "units",
+    )
+    private val WRAPPER_KEYS = setOf(
+        "data", "content", "payload", "result", "results", "body", "response",
+        "catalog", "menu", "store", "vendor",
+    )
 
     private companion object {
         const val MIN_PRICE = 20.0
         const val MAX_PRICE = 100_000_000.0
-        const val MAX_DEPTH = 24
-        const val MAX_PRODUCTS = 20_000
+        const val MAX_DEPTH = 28
+        const val MAX_PRODUCTS = 30_000
+        const val LOCAL_SEARCH_DEPTH = 3
     }
 }
