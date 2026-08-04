@@ -1,0 +1,35 @@
+name: Apply v1.2 payload
+
+on:
+  push:
+    branches:
+      - feat/v12-auto-catalog-strict-promos
+    paths:
+      - tools/apply_v12_payload.py
+      - tools/v12_payload_*.txt
+      - .github/workflows/apply-v12-payload.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, 'Apply v1.2 payload') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/v12-auto-catalog-strict-promos
+      - name: Apply source payload
+        run: python tools/apply_v12_payload.py
+      - name: Commit generated sources
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app
+          if git diff --cached --quiet; then
+            echo "No source changes to commit"
+          else
+            git commit -m "Apply v1.2 payload"
+            git push origin HEAD:feat/v12-auto-catalog-strict-promos
+          fi
