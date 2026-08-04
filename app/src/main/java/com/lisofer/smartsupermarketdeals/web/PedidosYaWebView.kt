@@ -195,7 +195,7 @@ fun PedidosYaWebView(
                         )
                         WebViewCompat.addDocumentStartJavaScript(
                             this,
-                            searchCatalogHarvesterScript,
+                            searchEndpointHarvesterScript,
                             allowedOrigins,
                         )
                     } else {
