@@ -1,40 +1,27 @@
 package com.lisofer.smartsupermarketdeals.web
 
+import java.nio.file.Files
+import org.junit.Assert.assertEquals
 import org.junit.Test
-import org.mozilla.javascript.Context
-import org.mozilla.javascript.EvaluatorException
 
 class SearchEndpointHarvesterScriptTest {
     @Test
-    fun `endpoint harvester is valid JavaScript`() {
-        val context = Context.enter()
+    fun `endpoint harvester is valid modern JavaScript`() {
+        val script = Files.createTempFile("smart-deals-endpoint-harvester", ".js")
         try {
-            context.optimizationLevel = -1
-            context.languageVersion = Context.VERSION_ES6
-            try {
-                context.compileString(
-                    searchEndpointHarvesterScript,
-                    "SearchEndpointHarvesterScript.js",
-                    1,
-                    null,
-                )
-            } catch (error: EvaluatorException) {
-                throw AssertionError(
-                    buildString {
-                        append("JavaScript inválido: ")
-                        append(error.message)
-                        append(" · línea=")
-                        append(error.lineNumber())
-                        append(" · columna=")
-                        append(error.columnNumber())
-                        append(" · fragmento=")
-                        append(error.lineSource())
-                    },
-                    error,
-                )
-            }
+            Files.writeString(script, searchEndpointHarvesterScript)
+            val process = ProcessBuilder("node", "--check", script.toString())
+                .redirectErrorStream(true)
+                .start()
+            val output = process.inputStream.bufferedReader().use { it.readText() }
+            val exitCode = process.waitFor()
+            assertEquals(
+                "El parser V8 rechazó el JavaScript:\n$output",
+                0,
+                exitCode,
+            )
         } finally {
-            Context.exit()
+            Files.deleteIfExists(script)
         }
     }
 }
