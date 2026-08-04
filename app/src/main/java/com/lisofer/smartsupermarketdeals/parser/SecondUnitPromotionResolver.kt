@@ -9,29 +9,19 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
- * PedidosYa does not always keep the mechanic and its percentage in the same JSON object.
- * A common shape is `mechanic = SECOND_UNIT` in one node and `value = 50` in a sibling.
- * PromotionInterpreter intentionally treats an isolated percentage as a direct discount, so
- * this resolver reconstructs the commercial context at product-subtree level first.
+ * Reconstructs promotions whose mechanic and numeric benefit are stored in sibling nodes, for
+ * example `mechanic.type = SECOND_UNIT` together with `benefit.type = PERCENTAGE, value = 50`.
  */
 internal object SecondUnitPromotionResolver {
     fun fromProductSubtree(product: JSONObject): PromotionContext? {
         val candidates = mutableListOf<Candidate>()
-        inspect(
-            node = product,
-            depth = 0,
-            inheritedCommercial = false,
-            output = candidates,
-        )
+        inspect(product, depth = 0, inheritedCommercial = false, candidates)
 
-        val best = candidates
-            .filter { it.percent in 0.5..100.0 }
-            .maxWithOrNull(
-                compareBy<Candidate> { it.score }
-                    .thenByDescending { it.depth }
-                    .thenBy { it.label.length }
-            )
-            ?: return null
+        val best = candidates.maxWithOrNull(
+            compareBy<Candidate> { it.score }
+                .thenBy { it.depth }
+                .thenBy { it.label.length }
+        ) ?: return null
 
         val percent = rounded(best.percent)
         val title = "2da unidad ${percentLabel(percent)}% OFF"
@@ -58,7 +48,8 @@ internal object SecondUnitPromotionResolver {
     private data class Signals(
         var secondUnit: Boolean = false,
         var localSecondUnit: Boolean = false,
-        var nodes: Int = 0,
+        var typedPercentage: Boolean = false,
+        var visitedNodes: Int = 0,
         val percentages: LinkedHashSet<Double> = LinkedHashSet(),
         val humanTexts: LinkedHashSet<String> = LinkedHashSet(),
     )
@@ -73,21 +64,25 @@ internal object SecondUnitPromotionResolver {
         when (node) {
             is JSONObject -> {
                 val commercialHere = inheritedCommercial || looksCommercial(node)
-                val signals = collectSignals(
-                    node = node,
-                    depth = 0,
-                    inheritedSecond = false,
-                    commercialOnly = !commercialHere,
-                )
+                val signals = Signals()
+                collectScope(node, depth = 0, inheritedSecond = false, signals)
+
                 if (signals.secondUnit && signals.percentages.size == 1) {
                     val percent = signals.percentages.single()
-                    val label = humanLabel(signals.humanTexts, percent)
-                    val score =
-                        (if (commercialHere) 80 else 0) +
-                            (if (signals.localSecondUnit) 45 else 0) +
-                            depth * 4 -
-                            signals.nodes.coerceAtMost(40)
-                    output += Candidate(percent, label, score, depth)
+                    if (percent in 0.5..100.0) {
+                        val score =
+                            (if (commercialHere) 100 else 0) +
+                                (if (signals.localSecondUnit) 50 else 0) +
+                                (if (signals.typedPercentage) 35 else 0) +
+                                depth * 5 -
+                                signals.visitedNodes.coerceAtMost(50)
+                        output += Candidate(
+                            percent = percent,
+                            label = humanLabel(signals.humanTexts, percent),
+                            score = score,
+                            depth = depth,
+                        )
+                    }
                 }
 
                 val keys = node.keys()
@@ -115,65 +110,56 @@ internal object SecondUnitPromotionResolver {
         }
     }
 
-    private fun collectSignals(
+    private fun collectScope(
         node: Any?,
         depth: Int,
         inheritedSecond: Boolean,
-        commercialOnly: Boolean,
-    ): Signals {
-        val output = Signals(secondUnit = inheritedSecond)
-        collectInto(node, depth, inheritedSecond, commercialOnly, output)
-        return output
-    }
-
-    private fun collectInto(
-        node: Any?,
-        depth: Int,
-        inheritedSecond: Boolean,
-        commercialOnly: Boolean,
         output: Signals,
     ) {
-        if (node == null || depth > SIGNAL_DEPTH || output.nodes >= MAX_SIGNAL_NODES) return
-        output.nodes += 1
+        if (node == null || depth > SIGNAL_DEPTH || output.visitedNodes >= MAX_SIGNAL_NODES) return
+        output.visitedNodes += 1
 
         when (node) {
-            is String -> {
-                val cleaned = node.replace(Regex("\\s+"), " ").trim()
-                if (cleaned.length !in 1..260) return
-                val normalized = normalize(cleaned).replace('×', 'x')
-                val secondHere = SECOND_TEXT.containsMatchIn(normalized)
-                if (secondHere) {
-                    output.secondUnit = true
-                    output.localSecondUnit = true
-                    output.humanTexts += cleaned
-                }
-                TEXT_PERCENT.findAll(normalized).forEach { match ->
-                    match.groupValues.getOrNull(1)
-                        ?.replace(',', '.')
-                        ?.toDoubleOrNull()
-                        ?.takeIf { it in 0.5..100.0 }
-                        ?.let(output.percentages::add)
-                }
-                if (PROMO_HUMAN_TEXT.containsMatchIn(normalized)) {
-                    output.humanTexts += cleaned
-                }
-            }
+            is String -> collectString(node, inheritedSecond, output)
 
             is JSONObject -> {
+                val descriptorTexts = TYPE_KEYS.mapNotNull { key ->
+                    node.opt(key).asText()?.takeIf(String::isNotBlank)
+                }
+                val descriptor = normalizeSemantic(descriptorTexts.joinToString(" "))
+                val descriptorSecond = SECOND_SIGNAL.containsMatchIn(descriptor)
+                val objectSecond = inheritedSecond || descriptorSecond ||
+                    node.keys().asSequence().any(::isSecondKey)
+
+                if (descriptorSecond) {
+                    output.secondUnit = true
+                    output.localSecondUnit = true
+                    descriptorTexts.forEach(output.humanTexts::add)
+                }
+
+                val percentageTyped = PERCENTAGE_DESCRIPTOR.containsMatchIn(descriptor)
+                if (percentageTyped) {
+                    output.typedPercentage = true
+                    PERCENT_VALUE_KEYS.firstNotNullOfOrNull { key ->
+                        parsePercent(node.opt(key), key)
+                    }?.takeIf { it in 0.5..100.0 }
+                        ?.let(output.percentages::add)
+                }
+
                 val keys = node.keys()
-                while (keys.hasNext() && output.nodes < MAX_SIGNAL_NODES) {
+                while (keys.hasNext() && output.visitedNodes < MAX_SIGNAL_NODES) {
                     val key = keys.next()
                     if (isProductCollectionKey(key)) continue
                     val value = node.opt(key)
                     val keySecond = isSecondKey(key)
-                    val valueSecond = when (value) {
-                        is String -> SECOND_TEXT.containsMatchIn(normalize(value).replace('×', 'x'))
-                        else -> false
-                    }
-                    val secondHere = inheritedSecond || keySecond || valueSecond
+                    val valueSecond = value is String &&
+                        SECOND_SIGNAL.containsMatchIn(normalizeSemantic(value))
+                    val childSecond = objectSecond || keySecond || valueSecond
+
                     if (keySecond || valueSecond) {
                         output.secondUnit = true
                         output.localSecondUnit = true
+                        if (value is String) output.humanTexts += value
                     }
 
                     if (isPercentKey(key)) {
@@ -182,22 +168,37 @@ internal object SecondUnitPromotionResolver {
                             ?.let(output.percentages::add)
                     }
 
-                    val shouldTraverse = !commercialOnly ||
-                        isCommercialKey(key) ||
-                        secondHere ||
-                        key.lowercase(Locale.ROOT) in GENERIC_WRAPPERS
-                    if (shouldTraverse || value is String) {
-                        collectInto(value, depth + 1, secondHere, commercialOnly, output)
-                    }
+                    collectScope(value, depth + 1, childSecond, output)
                 }
             }
 
             is JSONArray -> {
                 for (index in 0 until node.length()) {
-                    collectInto(node.opt(index), depth + 1, inheritedSecond, commercialOnly, output)
-                    if (output.nodes >= MAX_SIGNAL_NODES) break
+                    collectScope(node.opt(index), depth + 1, inheritedSecond, output)
+                    if (output.visitedNodes >= MAX_SIGNAL_NODES) break
                 }
             }
+        }
+    }
+
+    private fun collectString(raw: String, inheritedSecond: Boolean, output: Signals) {
+        val cleaned = raw.replace(Regex("\\s+"), " ").trim()
+        if (cleaned.length !in 1..320) return
+        val normalized = normalizeSemantic(cleaned).replace('×', 'x')
+        val secondHere = SECOND_SIGNAL.containsMatchIn(normalized)
+        if (secondHere || inheritedSecond) {
+            output.secondUnit = true
+            if (secondHere) output.localSecondUnit = true
+        }
+        TEXT_PERCENT.findAll(normalized).forEach { match ->
+            match.groupValues.getOrNull(1)
+                ?.replace(',', '.')
+                ?.toDoubleOrNull()
+                ?.takeIf { it in 0.5..100.0 }
+                ?.let(output.percentages::add)
+        }
+        if (secondHere || PROMO_HUMAN_TEXT.containsMatchIn(normalized)) {
+            output.humanTexts += cleaned
         }
     }
 
@@ -208,8 +209,8 @@ internal object SecondUnitPromotionResolver {
             if (isCommercialKey(key) || isSecondKey(key)) return true
             val value = json.opt(key)
             if (value is String) {
-                val normalized = normalize(value)
-                if (SECOND_TEXT.containsMatchIn(normalized) ||
+                val normalized = normalizeSemantic(value)
+                if (SECOND_SIGNAL.containsMatchIn(normalized) ||
                     PROMO_HUMAN_TEXT.containsMatchIn(normalized)) {
                     return true
                 }
@@ -230,8 +231,7 @@ internal object SecondUnitPromotionResolver {
     }
 
     private fun isSecondKey(key: String): Boolean {
-        val normalized = normalize(key.replace('_', ' ').replace('-', ' '))
-        return SECOND_KEY.containsMatchIn(normalized)
+        return SECOND_SIGNAL.containsMatchIn(normalizeSemantic(key))
     }
 
     private fun isPercentKey(key: String): Boolean {
@@ -264,15 +264,21 @@ internal object SecondUnitPromotionResolver {
         } else raw
     }
 
+    private fun Any?.asText(): String? = when (this) {
+        is String -> trim().takeIf(String::isNotBlank)
+        is Number -> toString()
+        else -> null
+    }
+
     private fun humanLabel(texts: Set<String>, percent: Double): String {
         val selected = texts.asSequence()
             .map { it.replace(Regex("\\s+"), " ").trim() }
             .filter { it.length in 2..180 }
             .filterNot { UUID.matches(it) }
-            .distinctBy(::normalize)
+            .distinctBy(::normalizeSemantic)
             .sortedByDescending { value ->
-                val normalized = normalize(value)
-                (if (SECOND_TEXT.containsMatchIn(normalized)) 10 else 0) +
+                val normalized = normalizeSemantic(value)
+                (if (SECOND_SIGNAL.containsMatchIn(normalized)) 10 else 0) +
                     (if (TEXT_PERCENT.containsMatchIn(normalized)) 5 else 0)
             }
             .take(3)
@@ -293,8 +299,11 @@ internal object SecondUnitPromotionResolver {
             normalized.contains("catalogitem")
     }
 
-    private fun normalize(value: String): String {
-        return Normalizer.normalize(value.lowercase(Locale.ROOT), Normalizer.Form.NFD)
+    private fun normalizeSemantic(value: String): String {
+        return Normalizer.normalize(
+            value.lowercase(Locale.ROOT).replace('_', ' ').replace('-', ' '),
+            Normalizer.Form.NFD,
+        )
             .replace(Regex("\\p{M}+"), "")
             .replace(Regex("\\s+"), " ")
             .trim()
@@ -308,17 +317,14 @@ internal object SecondUnitPromotionResolver {
         String.format(Locale("es", "AR"), "%.1f", value)
     }
 
-    private val SECOND_TEXT = Regex(
-        "(?:\\bsecond\\s*(?:unit|item|product)\\b|\\bsecond_(?:unit|item|product)\\b|" +
+    private val SECOND_SIGNAL = Regex(
+        "(?:\\bsecond\\s*(?:unit|item|product)\\b|" +
             "\\bsegunda\\s*(?:unidad|compra)?\\b|\\bsegundo\\s*(?:producto|item)?\\b|" +
             "\\b2\\s*\\.?\\s*(?:da|do|°|º)\\.?\\s*(?:unidad|producto|item)?\\b)"
     )
-    private val SECOND_KEY = Regex(
-        "(?:second\\s*(?:unit|item|product)|segunda\\s*(?:unidad|compra)?|" +
-            "segundo\\s*(?:producto|item)?|2\\s*(?:da|do))"
-    )
+    private val PERCENTAGE_DESCRIPTOR = Regex("(?:percentage|percent|porcentaje)")
     private val TEXT_PERCENT = Regex(
-        "\\b(\\d{1,3}(?:[.,]\\d+)?)\\s*(?:%|por ciento|off|dto|de descuento)\\b"
+        "\\b(\\d{1,3}(?:[.,]\\d+)?)\\s*(?:%|por ciento|off|dto|de descuento)(?!\\w)"
     )
     private val PROMO_HUMAN_TEXT = Regex(
         "(?:segunda|segundo|2\\s*\\.?\\s*(?:da|do)|%|off|dto|descuento|promo|oferta|beneficio)"
@@ -327,13 +333,18 @@ internal object SecondUnitPromotionResolver {
     private val UUID = Regex(
         "(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
     )
-    private val GENERIC_WRAPPERS = setOf(
-        "data", "metadata", "meta", "configuration", "config", "rules", "rule",
-        "conditions", "condition", "content", "details", "attributes", "value", "values",
+    private val TYPE_KEYS = listOf(
+        "type", "kind", "mechanic", "mechanicType", "mechanic_type",
+        "promotionType", "promotion_type", "benefitType", "benefit_type",
+        "discountType", "discount_type", "name", "label", "text",
+    )
+    private val PERCENT_VALUE_KEYS = listOf(
+        "value", "amount", "percentage", "percent", "percentageOff", "percentage_off",
+        "discountValue", "discount_value", "benefitValue", "benefit_value", "rate", "ratio",
     )
 
-    private const val INSPECT_DEPTH = 12
-    private const val SIGNAL_DEPTH = 8
-    private const val MAX_SIGNAL_NODES = 500
-    private const val MAX_CANDIDATES = 80
+    private const val INSPECT_DEPTH = 14
+    private const val SIGNAL_DEPTH = 12
+    private const val MAX_SIGNAL_NODES = 1_200
+    private const val MAX_CANDIDATES = 120
 }
