@@ -128,6 +128,8 @@ fun PedidosYaWebView(
                             view.evaluateJavascript(
                                 "window.__smartDealsEmitEmbeddedJson && " +
                                     "window.__smartDealsEmitEmbeddedJson(); " +
+                                    "window.__smartDealsPromotionDomScan && " +
+                                    "window.__smartDealsPromotionDomScan(); " +
                                     "window.__smartDealsExhaustiveRescan && " +
                                     "window.__smartDealsExhaustiveRescan();",
                                 null,
@@ -137,6 +139,8 @@ fun PedidosYaWebView(
                                     view.evaluateJavascript(
                                         "window.__smartDealsEmitEmbeddedJson && " +
                                             "window.__smartDealsEmitEmbeddedJson(); " +
+                                            "window.__smartDealsPromotionDomScan && " +
+                                            "window.__smartDealsPromotionDomScan(); " +
                                             "window.__smartDealsExhaustiveRescan && " +
                                             "window.__smartDealsExhaustiveRescan();",
                                         null,
@@ -187,6 +191,11 @@ fun PedidosYaWebView(
                         WebViewCompat.addDocumentStartJavaScript(
                             this,
                             rawJsonCaptureScript,
+                            allowedOrigins,
+                        )
+                        WebViewCompat.addDocumentStartJavaScript(
+                            this,
+                            promotionDomCaptureScript,
                             allowedOrigins,
                         )
                         WebViewCompat.addDocumentStartJavaScript(
