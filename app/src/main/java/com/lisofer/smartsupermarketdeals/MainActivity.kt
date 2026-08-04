@@ -84,7 +84,7 @@ private fun SmartDealsApp(database: DealsDatabase) {
 
     suspend fun refresh() {
         val snapshot = withContext(Dispatchers.IO) {
-            database.stores() to database.promotionGroups(maxPerCategory = 20)
+            database.stores() to database.promotionGroups()
         }
         stores = snapshot.first
         promotionGroups = snapshot.second
@@ -170,7 +170,7 @@ private fun HomeScreen(
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    text = "Promociones publicadas · hasta 20 productos por filtro",
+                    text = "Todos los productos encontrados, separados por descuento",
                     style = MaterialTheme.typography.bodyMedium,
                 )
             }
