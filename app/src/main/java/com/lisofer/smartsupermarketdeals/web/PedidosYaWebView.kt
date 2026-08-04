@@ -122,91 +122,74 @@ fun PedidosYaWebView(
                             currentOnPageFinished.value()
                             CookieManager.getInstance().flush()
 
-                            val rootLiteral = JSONObject.quote(currentRootUrl.value)
-                            val initialScript = if (autoExplore) {
-                                "window.__smartDealsEndpointMode = true; " +
-                                    "window.__smartDealsSetRoot && window.__smartDealsSetRoot($rootLiteral);"
-                            } else {
-                                "window.__smartDealsSetRoot && window.__smartDealsSetRoot($rootLiteral); " +
-                                    "window.__smartDealsEmitEmbeddedJson && " +
-                                    "window.__smartDealsEmitEmbeddedJson(); " +
-                                    "window.__smartDealsPromotionDomScan && " +
-                                    "window.__smartDealsPromotionDomScan(); " +
-                                    "window.__smartDealsExhaustiveRescan && " +
-                                    "window.__smartDealsExhaustiveRescan();"
-                            }
-                            view.evaluateJavascript(initialScript, null)
+                            // Manual store selection must remain a normal, untouched PedidosYa page.
+                            if (!autoExplore) return
 
-                            if (!autoExplore) {
-                                view.postDelayed({
-                                    runCatching { view.evaluateJavascript(initialScript, null) }
-                                }, 1_800)
-                            } else {
-                                view.postDelayed({
-                                    runCatching {
-                                        view.evaluateJavascript(
-                                            "window.__smartDealsSetRoot && " +
-                                                "window.__smartDealsSetRoot($rootLiteral); " +
-                                                "window.__smartDealsStartExplore && " +
-                                                "window.__smartDealsStartExplore();",
-                                            null,
-                                        )
-                                    }
-                                }, 1_350)
-                            }
+                            val rootLiteral = JSONObject.quote(currentRootUrl.value)
+                            view.evaluateJavascript(
+                                "window.__smartDealsEndpointMode = true; " +
+                                    "window.__smartDealsSetRoot && " +
+                                    "window.__smartDealsSetRoot($rootLiteral);",
+                                null,
+                            )
+                            view.postDelayed({
+                                runCatching {
+                                    view.evaluateJavascript(
+                                        "window.__smartDealsSetRoot && " +
+                                            "window.__smartDealsSetRoot($rootLiteral); " +
+                                            "window.__smartDealsStartExplore && " +
+                                            "window.__smartDealsStartExplore();",
+                                        null,
+                                    )
+                                }
+                            }, 1_350)
                         }
                     }
 
-                    val bridgeSupported = WebViewFeature.isFeatureSupported(
-                        WebViewFeature.WEB_MESSAGE_LISTENER
-                    )
-                    val scriptSupported = WebViewFeature.isFeatureSupported(
-                        WebViewFeature.DOCUMENT_START_SCRIPT
-                    )
-                    if (bridgeSupported && scriptSupported) {
-                        WebViewCompat.addWebMessageListener(
-                            this,
-                            "SmartDealsBridge",
-                            allowedOrigins,
-                        ) { _, message, sourceOrigin, _, _ ->
-                            val host = sourceOrigin.host.orEmpty()
-                            if (host == "pedidosya.com.ar" || host.endsWith(".pedidosya.com.ar")) {
-                                val raw = message.data ?: return@addWebMessageListener
-                                val envelope = runCatching { JSONObject(raw) }.getOrNull()
-                                when (envelope?.optString("event")) {
-                                    "explore_progress" -> {
-                                        currentOnExplorationProgress.value(envelope.optInt("step", 0))
+                    // Scanner hooks are installed only on the analysis screen. The manual WebView
+                    // receives no bridge, no fetch/XHR wrappers and no DOM crawler.
+                    if (autoExplore) {
+                        val bridgeSupported = WebViewFeature.isFeatureSupported(
+                            WebViewFeature.WEB_MESSAGE_LISTENER
+                        )
+                        val scriptSupported = WebViewFeature.isFeatureSupported(
+                            WebViewFeature.DOCUMENT_START_SCRIPT
+                        )
+                        if (bridgeSupported && scriptSupported) {
+                            WebViewCompat.addWebMessageListener(
+                                this,
+                                "SmartDealsBridge",
+                                allowedOrigins,
+                            ) { _, message, sourceOrigin, _, _ ->
+                                val host = sourceOrigin.host.orEmpty()
+                                if (host == "pedidosya.com.ar" || host.endsWith(".pedidosya.com.ar")) {
+                                    val raw = message.data ?: return@addWebMessageListener
+                                    val envelope = runCatching { JSONObject(raw) }.getOrNull()
+                                    when (envelope?.optString("event")) {
+                                        "explore_progress" -> {
+                                            currentOnExplorationProgress.value(
+                                                envelope.optInt("step", 0)
+                                            )
+                                        }
+                                        "explore_complete" -> currentOnExplorationFinished.value()
+                                        "explore_started", "catalog_routes", "route_change" -> Unit
+                                        else -> currentOnPayload.value(raw)
                                     }
-                                    "explore_complete" -> currentOnExplorationFinished.value()
-                                    "explore_started", "catalog_routes", "route_change" -> Unit
-                                    else -> currentOnPayload.value(raw)
                                 }
                             }
-                        }
-                        if (!autoExplore) {
                             WebViewCompat.addDocumentStartJavaScript(
                                 this,
-                                rawJsonCaptureScript,
+                                exhaustiveCatalogScript,
                                 allowedOrigins,
                             )
                             WebViewCompat.addDocumentStartJavaScript(
                                 this,
-                                promotionDomCaptureScript,
+                                searchEndpointHarvesterScript,
                                 allowedOrigins,
                             )
+                        } else {
+                            currentOnUnsupported.value()
                         }
-                        WebViewCompat.addDocumentStartJavaScript(
-                            this,
-                            exhaustiveCatalogScript,
-                            allowedOrigins,
-                        )
-                        WebViewCompat.addDocumentStartJavaScript(
-                            this,
-                            searchEndpointHarvesterScript,
-                            allowedOrigins,
-                        )
-                    } else {
-                        currentOnUnsupported.value()
                     }
                     tag = url
 
