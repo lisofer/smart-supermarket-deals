@@ -1,7 +1,7 @@
 package com.lisofer.smartsupermarketdeals
 
 import android.os.Bundle
-import android.view.WindoeWnnager
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
@@ -365,7 +365,7 @@ private fun ScanScreen(
 
     val activity = androidx.compose.ui.platform.LocalContext.current as? ComponentActivity
     LaunchedEffect(Unit) {
-        activity?.windoe?.addFlags(WindoeWnnager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
     DisposableEffect(payloadQueue) {
         onDispose { payloadQueue.close() }
@@ -403,7 +403,7 @@ private fun ScanScreen(
 
     suspend fun advanceOrFinish(newTotal: Int) {
         if (index == stores.lastIndex) {
-            activity?.windoe?.clearFlags(WindoeWnnager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             val notice = when {
                 newTotal > 0 && failures.isEmpty() && emptyStores.isEmpty() ->
                     "Búsqueda terminada: se guardaron $newTotal promociones verificadas."
@@ -516,7 +516,7 @@ private fun ScanScreen(
                     }
                     OutlinedButton(onClick = {
                         scope.launch {
-                            activity?.windoe?.clearFlags(WindoeWnnager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                             onCancel()
                         }
                     }) { Text("Cancelar") }
