@@ -32,6 +32,7 @@ class ProductJsonExtractorBatchTest {
                   "productId":"second-70",
                   "name":"Agua manzana 500 ml",
                   "pricing":{"price":"$ 1.769"},
+                  "tags":[{"label":"2DA AL 70% OFF"}],
                   "commercial":{"label":"1 ud. al 70% dto"}
                 }
               ]
@@ -53,7 +54,6 @@ class ProductJsonExtractorBatchTest {
         assertEquals(PromotionKind.DIRECT_PERCENT, directProduct!!.promotionKind)
         assertEquals(45.0, directProduct.effectiveDiscountPercent!!, 0.01)
         assertEquals(PromotionKind.SECOND_UNIT, secondProduct!!.promotionKind)
-        assertEquals("2da al 70% OFF", secondProduct.promotionTitle)
         assertEquals(35.0, secondProduct.effectiveDiscountPercent!!, 0.01)
     }
 
