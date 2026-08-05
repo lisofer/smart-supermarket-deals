@@ -156,6 +156,7 @@ fun PedidosYaWebView(
                             WebViewFeature.DOCUMENT_START_SCRIPT
                         )
                         if (bridgeSupported && scriptSupported) {
+                            var fastCoverageActive = false
                             WebViewCompat.addWebMessageListener(
                                 this,
                                 "SmartDealsBridge",
@@ -166,12 +167,21 @@ fun PedidosYaWebView(
                                     val raw = message.data ?: return@addWebMessageListener
                                     val envelope = runCatching { JSONObject(raw) }.getOrNull()
                                     when (envelope?.optString("event")) {
+                                        "coverage_started" -> fastCoverageActive = true
+                                        "coverage_complete" -> {
+                                            fastCoverageActive = false
+                                            currentOnExplorationFinished.value()
+                                        }
                                         "explore_progress" -> {
                                             currentOnExplorationProgress.value(
                                                 envelope.optInt("step", 0)
                                             )
                                         }
-                                        "explore_complete" -> currentOnExplorationFinished.value()
+                                        "explore_complete" -> {
+                                            if (!fastCoverageActive) {
+                                                currentOnExplorationFinished.value()
+                                            }
+                                        }
                                         "explore_started", "catalog_routes", "route_change" -> Unit
                                         else -> currentOnPayload.value(raw)
                                     }
@@ -192,6 +202,13 @@ fun PedidosYaWebView(
                             WebViewCompat.addDocumentStartJavaScript(
                                 this,
                                 searchEndpointHarvesterScript,
+                                allowedOrigins,
+                            )
+                            // Wrap the learned request last: this replaces the one-query scan with
+                            // parallel category/letter coverage and emits its own final event.
+                            WebViewCompat.addDocumentStartJavaScript(
+                                this,
+                                fastCoverageSearchScript,
                                 allowedOrigins,
                             )
                         } else {
