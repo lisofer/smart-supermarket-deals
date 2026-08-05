@@ -10,6 +10,34 @@ object ProductJsonExtractor {
     fun extract(message: String): List<CapturedProduct> {
         return runCatching {
             val envelope = JSONObject(message)
+            if (envelope.optString("event") == "payload_batch") {
+                extractBatch(envelope.optJSONArray("payloads"))
+            } else {
+                extractEnvelope(envelope)
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun extractBatch(payloads: JSONArray?): List<CapturedProduct> {
+        if (payloads == null || payloads.length() == 0) return emptyList()
+
+        val bestProducts = LinkedHashMap<String, CapturedProduct>()
+        for (index in 0 until payloads.length()) {
+            val envelope = payloads.optJSONObject(index)
+                ?: payloads.optString(index)
+                    .takeIf(String::isNotBlank)
+                    ?.let { raw -> runCatching { JSONObject(raw) }.getOrNull() }
+                ?: continue
+
+            extractEnvelope(envelope).forEach { incoming ->
+                bestProducts[incoming.key] = prefer(bestProducts[incoming.key], incoming)
+            }
+        }
+        return bestProducts.values.toList()
+    }
+
+    private fun extractEnvelope(envelope: JSONObject): List<CapturedProduct> {
+        return runCatching {
             val sourceUrl = envelope.optString("url")
             val body = envelope.optString("body")
             if (body.isBlank()) return emptyList()
