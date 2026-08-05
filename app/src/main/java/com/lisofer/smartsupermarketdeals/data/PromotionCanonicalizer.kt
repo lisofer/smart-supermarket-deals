@@ -5,14 +5,7 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
-/**
- * Final consistency layer for promotions whose commercial label explicitly says
- * "2da unidad al X%" but arrived classified as a direct X% discount.
- *
- * PedidosYa can split the mechanic and percentage across adjacent fields. Joining
- * the saved label and title lets us correct the classification without guessing
- * from an isolated percentage.
- */
+/** Final display normalization for the promotion mechanic already detected by PedidosYa. */
 internal object PromotionCanonicalizer {
     fun captured(product: CapturedProduct): CapturedProduct {
         val percent = secondUnitPercent(product.promoLabel, product.promotionTitle)
@@ -52,8 +45,13 @@ internal object PromotionCanonicalizer {
 
         if (combined.isBlank()) return null
 
+        // PedidosYa exposes second-unit promotions in two forms:
+        // - visible badge: "2DA AL 70% OFF"
+        // - internal condition: "1 ud. al 70% dto"
+        // The latter means one of the two required units receives the discount.
         val raw = SECOND_UNIT_FORWARD.find(combined)?.groupValues?.getOrNull(1)
             ?: SECOND_UNIT_REVERSE.find(combined)?.groupValues?.getOrNull(1)
+            ?: ONE_DISCOUNTED_UNIT.find(combined)?.groupValues?.getOrNull(1)
             ?: return null
 
         return raw
@@ -78,7 +76,7 @@ internal object PromotionCanonicalizer {
         "second:${String.format(Locale.US, "%.1f", percent)}"
 
     private fun title(percent: Double): String =
-        "2da unidad ${label(percent)}% OFF"
+        "2da al ${label(percent)}% OFF"
 
     private fun rounded(value: Double): Double = (value * 10.0).roundToInt() / 10.0
 
@@ -103,5 +101,8 @@ internal object PromotionCanonicalizer {
     )
     private val SECOND_UNIT_REVERSE = Regex(
         "$PERCENT_VALUE$PERCENT_SUFFIX[^0-9]{0,100}$SECOND_MARKER"
+    )
+    private val ONE_DISCOUNTED_UNIT = Regex(
+        "\\b1\\s*(?:ud|unidad)\\.?\\s*(?:al|con)\\s*$PERCENT_VALUE$PERCENT_SUFFIX"
     )
 }
