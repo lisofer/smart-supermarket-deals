@@ -28,12 +28,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
+import org.json.JSONArray
 import org.json.JSONObject
 
 private val allowedOrigins = setOf(
     "https://pedidosya.com.ar",
     "https://*.pedidosya.com.ar",
 )
+
+private const val MAX_BUFFERED_PAYLOADS = 32
+private const val MAX_BUFFERED_PAYLOAD_CHARS = 900_000
 
 private object PedidosYaSessionState {
     var addStoreWebState: Bundle? = null
@@ -157,6 +161,36 @@ fun PedidosYaWebView(
                         )
                         if (bridgeSupported && scriptSupported) {
                             var fastCoverageActive = false
+                            val payloadBuffer = mutableListOf<JSONObject>()
+                            var bufferedChars = 0
+
+                            val flushPayloads = fun() {
+                                if (payloadBuffer.isEmpty()) return
+
+                                val payloads = JSONArray()
+                                payloadBuffer.forEach { payloads.put(it) }
+                                payloadBuffer.clear()
+                                bufferedChars = 0
+
+                                currentOnPayload.value(
+                                    JSONObject()
+                                        .put("event", "payload_batch")
+                                        .put("payloads", payloads)
+                                        .toString()
+                                )
+                            }
+
+                            val queuePayload = fun(envelope: JSONObject, rawLength: Int) {
+                                payloadBuffer += envelope
+                                bufferedChars += rawLength
+                                if (
+                                    payloadBuffer.size >= MAX_BUFFERED_PAYLOADS ||
+                                    bufferedChars >= MAX_BUFFERED_PAYLOAD_CHARS
+                                ) {
+                                    flushPayloads()
+                                }
+                            }
+
                             WebViewCompat.addWebMessageListener(
                                 this,
                                 "SmartDealsBridge",
@@ -169,6 +203,7 @@ fun PedidosYaWebView(
                                     when (envelope?.optString("event")) {
                                         "coverage_started" -> fastCoverageActive = true
                                         "coverage_complete" -> {
+                                            flushPayloads()
                                             fastCoverageActive = false
                                             currentOnExplorationFinished.value()
                                         }
@@ -179,11 +214,24 @@ fun PedidosYaWebView(
                                         }
                                         "explore_complete" -> {
                                             if (!fastCoverageActive) {
+                                                flushPayloads()
                                                 currentOnExplorationFinished.value()
                                             }
                                         }
                                         "explore_started", "catalog_routes", "route_change" -> Unit
-                                        else -> currentOnPayload.value(raw)
+                                        else -> {
+                                            val payloadUrl = envelope?.optString("url").orEmpty()
+                                            val duplicatedByFastCoverage = fastCoverageActive && (
+                                                payloadUrl.contains("#promotion-card-v13-") ||
+                                                    payloadUrl.contains("#endpoint-v12-")
+                                                )
+
+                                            when {
+                                                duplicatedByFastCoverage -> Unit
+                                                envelope != null -> queuePayload(envelope, raw.length)
+                                                else -> currentOnPayload.value(raw)
+                                            }
+                                        }
                                     }
                                 }
                             }
