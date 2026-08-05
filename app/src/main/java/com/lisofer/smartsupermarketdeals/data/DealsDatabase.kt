@@ -174,6 +174,7 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
      */
     fun saveScan(storeId: Long, products: Collection<CapturedProduct>) {
         val promotions = products
+            .map(PromotionCanonicalizer::captured)
             .filter { product ->
                 product.promotionCategory != null &&
                     product.promotionTitle != null &&
@@ -246,7 +247,7 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                     PromotionKind.valueOf(cursor.getString(9))
                 }.getOrNull() ?: continue
 
-                deals += PromotionDeal(
+                val deal = PromotionDeal(
                     productKey = cursor.getString(0),
                     productName = cursor.getString(1),
                     storeName = cursor.getString(2),
@@ -258,6 +259,7 @@ class DealsDatabase(context: Context) : SQLiteOpenHelper(context, DB_NAME, null,
                     effectiveDiscountPercent = cursor.getDouble(8),
                     promotionKind = kind,
                 )
+                deals += PromotionCanonicalizer.deal(deal)
             }
         }
 
