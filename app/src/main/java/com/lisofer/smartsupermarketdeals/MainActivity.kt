@@ -1,9 +1,13 @@
 package com.lisofer.smartsupermarketdeals
 
+import android.Manifest
+import android.os.Build
 import android.os.Bundle
-import android.view.WindowManager
+import android.content.pm.PackageManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,12 +31,10 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -41,38 +43,61 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.lisofer.smartsupermarketdeals.data.CapturedProduct
 import com.lisofer.smartsupermarketdeals.data.DealsDatabase
 import com.lisofer.smartsupermarketdeals.data.PromotionDeal
 import com.lisofer.smartsupermarketdeals.data.PromotionGroup
 import com.lisofer.smartsupermarketdeals.data.PromotionKind
 import com.lisofer.smartsupermarketdeals.data.Store
 import com.lisofer.smartsupermarketdeals.parser.ProductJsonExtractor
+import com.lisofer.smartsupermarketdeals.scan.BackgroundScanCoordinator
+import com.lisofer.smartsupermarketdeals.scan.BackgroundScanState
+import com.lisofer.smartsupermarketdeals.scan.PromotionScanService
 import com.lisofer.smartsupermarketdeals.web.PedidosYaWebView
 import java.text.NumberFormat
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val PEDIDOSYA_HOME = "https://www.pedidosya.com.ar/"
-private const val SCAN_TIMEOUT_MS = 360_000L
-private const val POST_EXPLORATION_SETTLE_MS = 900L
-private const val TIMEOUT_QUEUE_GRACE_MS = 15_000L
+private const val NOTIFICATION_PERMISSION_REQUEST = 1201
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        BackgroundScanCoordinator.restore(applicationContext)
+
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    SmartDealsApp(database = remember { DealsDatabase(applicationContext) })
+                    SmartDealsApp(
+                        database = remember { DealsDatabase(applicationContext) },
+                        onStartScan = {
+                            requestNotificationPermissionIfNeeded()
+                            PromotionScanService.start(applicationContext)
+                        },
+                        onCancelScan = {
+                            PromotionScanService.cancel(applicationContext)
+                        },
+                    )
                 }
             }
+        }
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                NOTIFICATION_PERMISSION_REQUEST,
+            )
         }
     }
 }
@@ -80,12 +105,17 @@ class MainActivity : ComponentActivity() {
 private enum class Screen { HOME, ADD_STORE, SCAN }
 
 @Composable
-private fun SmartDealsApp(database: DealsDatabase) {
+private fun SmartDealsApp(
+    database: DealsDatabase,
+    onStartScan: () -> Unit,
+    onCancelScan: () -> Unit,
+) {
     val scope = rememberCoroutineScope()
+    val scanState by BackgroundScanCoordinator.state.collectAsState()
     var screen by remember { mutableStateOf(Screen.HOME) }
     var stores by remember { mutableStateOf(emptyList<Store>()) }
     var promotionGroups by remember { mutableStateOf(emptyList<PromotionGroup>()) }
-    var scanNotice by remember { mutableStateOf<String?>(null) }
+    var scanNotice by remember { mutableStateOf(scanState.completedNotice) }
 
     suspend fun refresh() {
         val snapshot = withContext(Dispatchers.IO) {
@@ -96,18 +126,27 @@ private fun SmartDealsApp(database: DealsDatabase) {
     }
 
     LaunchedEffect(Unit) { refresh() }
+    LaunchedEffect(scanState.runId, scanState.isRunning, scanState.completedNotice) {
+        if (!scanState.isRunning && !scanState.completedNotice.isNullOrBlank()) {
+            refresh()
+            scanNotice = scanState.completedNotice
+            if (screen == Screen.SCAN) screen = Screen.HOME
+        }
+    }
 
     when (screen) {
         Screen.HOME -> HomeScreen(
             stores = stores,
             promotionGroups = promotionGroups,
             scanNotice = scanNotice,
+            scanState = scanState,
             onAddStore = {
                 scanNotice = null
                 screen = Screen.ADD_STORE
             },
             onAnalyze = {
                 scanNotice = null
+                if (!scanState.isRunning) onStartScan()
                 screen = Screen.SCAN
             },
             onDeleteStore = { store ->
@@ -129,17 +168,10 @@ private fun SmartDealsApp(database: DealsDatabase) {
             },
         )
 
-        Screen.SCAN -> ScanScreen(
-            stores = stores,
-            database = database,
-            onFinished = { notice ->
-                scope.launch {
-                    refresh()
-                    scanNotice = notice
-                    screen = Screen.HOME
-                }
-            },
-            onCancel = { screen = Screen.HOME },
+        Screen.SCAN -> BackgroundScanScreen(
+            state = scanState,
+            onBack = { screen = Screen.HOME },
+            onCancel = onCancelScan,
         )
     }
 }
@@ -149,6 +181,7 @@ private fun HomeScreen(
     stores: List<Store>,
     promotionGroups: List<PromotionGroup>,
     scanNotice: String?,
+    scanState: BackgroundScanState,
     onAddStore: () -> Unit,
     onAnalyze: () -> Unit,
     onDeleteStore: (Store) -> Unit,
@@ -180,7 +213,21 @@ private fun HomeScreen(
                 )
             }
 
-            scanNotice?.let { notice -> item { InfoCard(notice) } }
+            if (scanState.isRunning) {
+                item {
+                    InfoCard(
+                        buildString {
+                            append("Búsqueda en segundo plano: ")
+                            append(scanState.status.ifBlank { "analizando catálogo…" })
+                            if (scanState.pendingBatches > 0) {
+                                append(" · ${scanState.pendingBatches} lotes pendientes")
+                            }
+                        }
+                    )
+                }
+            } else {
+                scanNotice?.let { notice -> item { InfoCard(notice) } }
+            }
 
             item {
                 Row(
@@ -191,7 +238,9 @@ private fun HomeScreen(
                         modifier = Modifier.weight(1f),
                         enabled = stores.isNotEmpty(),
                         onClick = onAnalyze,
-                    ) { Text("Buscar descuentos") }
+                    ) {
+                        Text(if (scanState.isRunning) "Ver progreso" else "Buscar descuentos")
+                    }
                     OutlinedButton(
                         modifier = Modifier.weight(1f),
                         onClick = onAddStore,
@@ -219,7 +268,10 @@ private fun HomeScreen(
                                 Text(store.name, fontWeight = FontWeight.SemiBold)
                                 Text(store.url, style = MaterialTheme.typography.bodySmall, maxLines = 2)
                             }
-                            OutlinedButton(onClick = { onDeleteStore(store) }) { Text("Quitar") }
+                            OutlinedButton(
+                                enabled = !scanState.isRunning,
+                                onClick = { onDeleteStore(store) },
+                            ) { Text("Quitar") }
                         }
                     }
                 }
@@ -233,9 +285,8 @@ private fun HomeScreen(
             if (promotionGroups.isEmpty()) {
                 item {
                     InfoCard(
-                        "No hay promociones verificadas. Un porcentaje aislado ya no se considera " +
-                            "descuento: debe existir precio anterior, texto comercial o una regla " +
-                            "estructurada como 2x1 o segunda unidad."
+                        "No hay promociones verificadas. La búsqueda considera descuentos directos, " +
+                            "segunda unidad y promociones por cantidad."
                     )
                 }
             } else {
@@ -278,6 +329,68 @@ private fun HomeScreen(
                 }
             }
             item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+}
+
+@Composable
+private fun BackgroundScanScreen(
+    state: BackgroundScanState,
+    onBack: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    Scaffold { padding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Text(
+                "Búsqueda exhaustiva",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+            )
+
+            if (state.isRunning) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(14.dp),
+                ) {
+                    CircularProgressIndicator()
+                    Column(modifier = Modifier.weight(1f)) {
+                        if (state.storeCount > 0) {
+                            Text(
+                                "Tienda ${state.storeIndex}/${state.storeCount}: " +
+                                    (state.currentStoreName ?: "cargando"),
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                        Text(state.status.ifBlank { "Analizando catálogo…" })
+                        Text(
+                            "${state.productsFound} productos · " +
+                                "${state.promotionsFound} promociones · " +
+                                "${state.pendingBatches} lotes pendientes",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
+
+                InfoCard(
+                    "Podés salir de la app o apagar la pantalla. Android mantendrá una notificación " +
+                        "mientras trabaja y te avisará cuando termine."
+                )
+
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedButton(onClick = onBack) { Text("Dejar en segundo plano") }
+                    Button(onClick = onCancel) { Text("Cancelar búsqueda") }
+                }
+            } else {
+                InfoCard(state.completedNotice ?: "La búsqueda todavía no comenzó.")
+                OutlinedButton(onClick = onBack) { Text("Volver") }
+            }
         }
     }
 }
@@ -331,230 +444,6 @@ private fun AddStoreScreen(
                 onJsonPayload = { payload ->
                     capturedCount += ProductJsonExtractor.extract(payload).size
                 },
-                onUnsupportedWebView = { unsupported = true },
-            )
-        }
-    }
-}
-
-@Composable
-private fun ScanScreen(
-    stores: List<Store>,
-    database: DealsDatabase,
-    onFinished: (String?) -> Unit,
-    onCancel: () -> Unit,
-) {
-    if (stores.isEmpty()) {
-        LaunchedEffect(Unit) { onFinished("No hay tiendas guardadas para analizar.") }
-        return
-    }
-
-    val scope = rememberCoroutineScope()
-    var index by remember { mutableIntStateOf(0) }
-    var explorationComplete by remember(index) { mutableStateOf(false) }
-    var saved by remember(index) { mutableStateOf(false) }
-    var unsupported by remember { mutableStateOf(false) }
-    var status by remember(index) { mutableStateOf("Abriendo tienda…") }
-    var totalPromotions by remember { mutableIntStateOf(0) }
-    var pendingPayloads by remember(index) { mutableIntStateOf(0) }
-    val failures = remember { mutableStateListOf<String>() }
-    val emptyStores = remember { mutableStateListOf<String>() }
-    val products = remember(index) { mutableStateMapOf<String, CapturedProduct>() }
-    val payloadQueue = remember(index) { Channel<String>(Channel.UNLIMITED) }
-    val store = stores[index]
-
-    val activity = androidx.compose.ui.platform.LocalContext.current as? ComponentActivity
-    LaunchedEffect(Unit) {
-        activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-    }
-    DisposableEffect(payloadQueue) {
-        onDispose { payloadQueue.close() }
-    }
-
-    fun verifiedPromotionCount(): Int = products.values.count {
-        it.effectiveDiscountPercent != null &&
-            it.promotionCategory != null &&
-            it.promotionKind != null &&
-            it.promotionEvidence != null
-    }
-
-    LaunchedEffect(payloadQueue) {
-        for (payload in payloadQueue) {
-            val extracted = withContext(Dispatchers.Default) {
-                ProductJsonExtractor.extract(payload)
-            }
-            extracted.forEach { incoming ->
-                products[incoming.key] = ProductJsonExtractor.prefer(
-                    products[incoming.key],
-                    incoming,
-                )
-            }
-            pendingPayloads = (pendingPayloads - 1).coerceAtLeast(0)
-            val promoCount = verifiedPromotionCount()
-            status = buildString {
-                append(products.size)
-                append(" productos · ")
-                append(promoCount)
-                append(" promociones verificadas")
-                if (pendingPayloads > 0) append(" · procesando $pendingPayloads lotes")
-            }
-        }
-    }
-
-    suspend fun advanceOrFinish(newTotal: Int) {
-        if (index == stores.lastIndex) {
-            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            val notice = when {
-                newTotal > 0 && failures.isEmpty() && emptyStores.isEmpty() ->
-                    "Búsqueda terminada: se guardaron $newTotal promociones verificadas."
-                newTotal > 0 -> buildString {
-                    append("Se guardaron $newTotal promociones verificadas.")
-                    if (emptyStores.isNotEmpty()) {
-                        append(" Sin promociones en: ${emptyStores.joinToString()}.")
-                    }
-                    if (failures.isNotEmpty()) {
-                        append(" El análisis quedó incompleto en: ${failures.joinToString()}.")
-                    }
-                }
-                failures.isEmpty() ->
-                    "Búsqueda terminada: no se encontraron promociones verificadas. " +
-                        "Se eliminaron resultados anteriores que no pudieron confirmarse."
-                else ->
-                    "No se encontraron promociones verificadas y el análisis quedó incompleto en: " +
-                        failures.joinToString() + "."
-            }
-            onFinished(notice)
-        } else {
-            index += 1
-        }
-    }
-
-    suspend fun finishCurrentStore(timeout: Boolean) {
-        if (saved) return
-
-        if (timeout && pendingPayloads > 0) {
-            status = "Procesando los últimos $pendingPayloads lotes antes de guardar…"
-            val deadline = System.currentTimeMillis() + TIMEOUT_QUEUE_GRACE_MS
-            while (pendingPayloads > 0 && System.currentTimeMillis() < deadline) delay(100)
-        }
-        if (saved) return
-
-        val promotionalProducts = products.values.filter {
-            it.effectiveDiscountPercent != null &&
-                it.promotionCategory != null &&
-                it.promotionKind != null &&
-                it.promotionEvidence != null
-        }
-
-        if (timeout && promotionalProducts.isEmpty()) {
-            saved = true
-            failures += store.name
-            status = "El análisis no terminó; conservo los resultados anteriores de esta tienda."
-            delay(700)
-            advanceOrFinish(totalPromotions)
-            return
-        }
-
-        saved = true
-        status = if (promotionalProducts.isEmpty()) {
-            "Sin promociones verificadas; limpiando resultados anteriores incorrectos…"
-        } else {
-            "Guardando ${promotionalProducts.size} promociones verificadas…"
-        }
-        withContext(Dispatchers.IO) {
-            database.saveScan(store.id, promotionalProducts)
-        }
-        if (promotionalProducts.isEmpty()) emptyStores += store.name
-        val newTotal = totalPromotions + promotionalProducts.size
-        totalPromotions = newTotal
-        delay(300)
-        advanceOrFinish(newTotal)
-    }
-
-    LaunchedEffect(index) {
-        delay(SCAN_TIMEOUT_MS)
-        status = "Se alcanzó el límite de seguridad; cerrando con lo ya verificado…"
-        finishCurrentStore(timeout = true)
-    }
-
-    LaunchedEffect(index, explorationComplete, pendingPayloads) {
-        if (!explorationComplete) return@LaunchedEffect
-        if (pendingPayloads > 0) {
-            status = "Catálogo descargado; procesando los últimos $pendingPayloads lotes…"
-            return@LaunchedEffect
-        }
-        status = "Catálogo procesado; consolidando promociones verificadas…"
-        delay(POST_EXPLORATION_SETTLE_MS)
-        finishCurrentStore(timeout = false)
-    }
-
-    Scaffold { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding),
-        ) {
-            Column(modifier = Modifier.padding(14.dp)) {
-                Text(
-                    "Buscando ${index + 1}/${stores.size}: ${store.name}",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    CircularProgressIndicator()
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(status)
-                        Text(
-                            "La búsqueda se realiza automáticamente, pagina el catálogo interno y " +
-                                "solo subdivide términos cuando una consulta queda truncada.",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                    OutlinedButton(onClick = {
-                        scope.launch {
-                            activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-                            onCancel()
-                        }
-                    }) { Text("Cancelar") }
-                }
-                if (unsupported) {
-                    Text(
-                        "Tu WebView no admite la captura. Actualizá Android System WebView.",
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-            }
-
-            PedidosYaWebView(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                url = store.url,
-                freshLoad = true,
-                autoExplore = true,
-                onJsonPayload = { payload ->
-                    pendingPayloads += 1
-                    if (payloadQueue.trySend(payload).isFailure) {
-                        pendingPayloads = (pendingPayloads - 1).coerceAtLeast(0)
-                    }
-                },
-                onPageFinished = {
-                    explorationComplete = false
-                    status = "Página cargada; detectando automáticamente el buscador…"
-                },
-                onExplorationProgress = { step ->
-                    status = buildString {
-                        append("Catálogo automático: paso $step · ${products.size} productos")
-                        val promoCount = verifiedPromotionCount()
-                        if (promoCount > 0) append(" · $promoCount promociones")
-                        if (pendingPayloads > 0) append(" · $pendingPayloads lotes pendientes")
-                    }
-                },
-                onExplorationFinished = { explorationComplete = true },
                 onUnsupportedWebView = { unsupported = true },
             )
         }
