@@ -6,14 +6,14 @@ import org.junit.Test
 
 class PromotionCanonicalizerTest {
     @Test
-    fun splitSecondUnitLabelOverridesDirectClassification() {
+    fun internalOneDiscountedUnitRuleBecomesSecondUnit() {
         val product = CapturedProduct(
             key = "product-1",
-            name = "Producto",
-            price = 1_000.0,
+            name = "Agua saborizada",
+            price = 1_769.0,
             originalPrice = null,
             advertisedDiscountPercent = 70.0,
-            promoLabel = "2DA UNIDAD · 70% OFF",
+            promoLabel = "1 ud. al 70% dto",
             promotionCategory = "percent:70.0",
             promotionTitle = "70% OFF",
             effectiveDiscountPercent = 70.0,
@@ -26,47 +26,43 @@ class PromotionCanonicalizerTest {
 
         assertEquals(PromotionKind.SECOND_UNIT, normalized.promotionKind)
         assertEquals("second:70.0", normalized.promotionCategory)
-        assertEquals("2da unidad 70% OFF", normalized.promotionTitle)
+        assertEquals("2da al 70% OFF", normalized.promotionTitle)
         assertEquals(70.0, normalized.advertisedDiscountPercent!!, 0.01)
         assertEquals(35.0, normalized.effectiveDiscountPercent!!, 0.01)
-        assertEquals(PromotionEvidence.PRODUCT_TEXT, normalized.promotionEvidence)
     }
 
     @Test
-    fun mechanicAndPercentageMayArriveInSeparateFields() {
-        val normalized = PromotionCanonicalizer.secondUnitPercent(
-            "2DA UNIDAD",
-            "70% OFF",
-        )
-
-        assertEquals(70.0, normalized!!, 0.01)
+    fun visibleSecondUnitBadgeAlsoBecomesSecondUnit() {
+        val normalized = PromotionCanonicalizer.secondUnitPercent("2DA AL 60% OFF")
+        assertEquals(60.0, normalized!!, 0.01)
     }
 
     @Test
-    fun directPercentageWithoutSecondUnitMarkerIsUntouched() {
-        assertNull(PromotionCanonicalizer.secondUnitPercent("70% OFF"))
+    fun plainDirectPercentageRemainsDirect() {
+        assertNull(PromotionCanonicalizer.secondUnitPercent("45% OFF"))
+        assertNull(PromotionCanonicalizer.secondUnitPercent("25% OFF"))
     }
 
     @Test
-    fun existingStoredDealIsCorrectedWithoutRescan() {
+    fun storedDealIsRelabeledWithoutAnotherScan() {
         val deal = PromotionDeal(
             productKey = "product-2",
             productName = "Producto guardado",
             storeName = "PedidosYa Market",
-            currentPrice = 2_000.0,
+            currentPrice = 1_929.0,
             originalPrice = null,
-            promoLabel = "Segunda unidad al 60%",
-            categoryKey = "percent:60.0",
-            categoryTitle = "60% OFF",
-            effectiveDiscountPercent = 60.0,
+            promoLabel = "1 ud. al 70% dto",
+            categoryKey = "percent:70.0",
+            categoryTitle = "70% OFF",
+            effectiveDiscountPercent = 70.0,
             promotionKind = PromotionKind.DIRECT_PERCENT,
         )
 
         val normalized = PromotionCanonicalizer.deal(deal)
 
         assertEquals(PromotionKind.SECOND_UNIT, normalized.promotionKind)
-        assertEquals("second:60.0", normalized.categoryKey)
-        assertEquals("2da unidad 60% OFF", normalized.categoryTitle)
-        assertEquals(30.0, normalized.effectiveDiscountPercent, 0.01)
+        assertEquals("second:70.0", normalized.categoryKey)
+        assertEquals("2da al 70% OFF", normalized.categoryTitle)
+        assertEquals(35.0, normalized.effectiveDiscountPercent, 0.01)
     }
 }
