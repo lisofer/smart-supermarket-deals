@@ -182,6 +182,13 @@ fun PedidosYaWebView(
                                 exhaustiveCatalogScript,
                                 allowedOrigins,
                             )
+                            // Install this before the endpoint harvester so its fetch/XHR observer
+                            // also sees the harvester's replayed catalog responses.
+                            WebViewCompat.addDocumentStartJavaScript(
+                                this,
+                                promotionCardCaptureScript,
+                                allowedOrigins,
+                            )
                             WebViewCompat.addDocumentStartJavaScript(
                                 this,
                                 searchEndpointHarvesterScript,
