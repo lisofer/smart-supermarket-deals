@@ -39,6 +39,11 @@ private val allowedOrigins = setOf(
 private const val MAX_BUFFERED_PAYLOADS = 32
 private const val MAX_BUFFERED_PAYLOAD_CHARS = 900_000
 
+internal fun shouldSuppressFastCoveragePayload(
+    payloadUrl: String,
+    fastCoverageActive: Boolean,
+): Boolean = fastCoverageActive && payloadUrl.contains("#endpoint-v12-")
+
 private object PedidosYaSessionState {
     var addStoreWebState: Bundle? = null
 }
@@ -221,13 +226,13 @@ fun PedidosYaWebView(
                                         "explore_started", "catalog_routes", "route_change" -> Unit
                                         else -> {
                                             val payloadUrl = envelope?.optString("url").orEmpty()
-                                            val duplicatedByFastCoverage = fastCoverageActive && (
-                                                payloadUrl.contains("#promotion-card-v13-") ||
-                                                    payloadUrl.contains("#endpoint-v12-")
-                                                )
+                                            val duplicatedEndpoint = shouldSuppressFastCoveragePayload(
+                                                payloadUrl = payloadUrl,
+                                                fastCoverageActive = fastCoverageActive,
+                                            )
 
                                             when {
-                                                duplicatedByFastCoverage -> Unit
+                                                duplicatedEndpoint -> Unit
                                                 envelope != null -> queuePayload(envelope, raw.length)
                                                 else -> currentOnPayload.value(raw)
                                             }
