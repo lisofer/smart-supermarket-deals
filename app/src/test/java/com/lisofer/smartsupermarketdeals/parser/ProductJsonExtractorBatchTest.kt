@@ -45,8 +45,8 @@ class ProductJsonExtractorBatchTest {
             .toString()
 
         val products = ProductJsonExtractor.extract(message)
-        val directProduct = products.firstOrNull { it.key.contains("direct-45") }
-        val secondProduct = products.firstOrNull { it.key.contains("second-70") }
+        val directProduct = products.firstOrNull { it.name == "Agua naranja 1.5 L" }
+        val secondProduct = products.firstOrNull { it.name == "Agua manzana 500 ml" }
 
         assertNotNull(directProduct)
         assertNotNull(secondProduct)
