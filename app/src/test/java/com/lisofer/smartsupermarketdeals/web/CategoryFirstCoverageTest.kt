@@ -6,24 +6,33 @@ import org.junit.Test
 
 class CategoryFirstCoverageTest {
     @Test
-    fun categoryCrawlerPersistsAndDiscoversActualAisles() {
-        assertTrue(exhaustiveCatalogScript.contains("__smartDealsCrawlerV14State"))
-        assertTrue(exhaustiveCatalogScript.contains("localStorage.getItem(KEY)"))
-        assertTrue(exhaustiveCatalogScript.contains("localStorage.setItem(KEY"))
-        assertTrue(exhaustiveCatalogScript.contains("__smartDealsResetCatalogCrawler"))
-        assertTrue(exhaustiveCatalogScript.contains("const MAX_PENDING_ROUTES = 500"))
-        assertTrue(exhaustiveCatalogScript.contains("likelyCategoryLink"))
-        assertTrue(exhaustiveCatalogScript.contains("categoryCrawler:true"))
-        assertFalse(exhaustiveCatalogScript.contains("sessionStorage.getItem(KEY)"))
+    fun backgroundBootstrapHandsControlDirectlyToV122Engine() {
+        assertTrue(exhaustiveCatalogScript.contains("__smartDealsV122BackgroundBootstrap"))
+        assertTrue(exhaustiveCatalogScript.contains("window.__smartDealsFastCoverageV19 = true"))
+        assertTrue(exhaustiveCatalogScript.contains("window.__smartDealsCatalogResponseV14 = true"))
+        assertTrue(exhaustiveCatalogScript.contains("v122BootstrapComplete"))
+        assertTrue(exhaustiveCatalogScript.contains("window.__smartDealsSearchFinished"))
+        assertTrue(exhaustiveCatalogScript.contains("event: 'coverage_complete'"))
+        assertFalse(exhaustiveCatalogScript.contains("__smartDealsCrawlerV14State"))
+        assertFalse(exhaustiveCatalogScript.contains("MAX_PENDING_ROUTES"))
     }
 
     @Test
-    fun categoryResponsesKeepEverySkuAndInheritedPromotion() {
-        assertTrue(catalogResponseCaptureScript.contains("catalog-response-v14"))
-        assertTrue(catalogResponseCaptureScript.contains("MAX_RESPONSE_CHARS = 12000000"))
-        assertTrue(catalogResponseCaptureScript.contains("product.__smartDealsSectionPromotion"))
-        assertTrue(catalogResponseCaptureScript.contains("products.push(product)"))
-        assertTrue(catalogResponseCaptureScript.contains("event: 'catalog_response'"))
-        assertTrue(catalogResponseCaptureScript.contains("BATCH_SIZE = 40"))
+    fun adaptiveEndpointEngineMatchesV122SearchPlan() {
+        assertTrue(searchEndpointHarvesterScript.contains("const MAX_REQUESTS = 360"))
+        assertTrue(searchEndpointHarvesterScript.contains("const MAX_PAGES_PER_QUERY = 150"))
+        assertTrue(searchEndpointHarvesterScript.contains("const MAX_PREFIX_DEPTH = 3"))
+        assertTrue(searchEndpointHarvesterScript.contains("const PAGE_CONCURRENCY = 4"))
+        assertTrue(searchEndpointHarvesterScript.contains("enqueue('')"))
+        assertTrue(searchEndpointHarvesterScript.contains("const needsSplit"))
+        assertTrue(searchEndpointHarvesterScript.contains("query.length < MAX_PREFIX_DEPTH"))
+    }
+
+    @Test
+    fun correctedPromotionBadgeCaptureRemainsEnabled() {
+        assertTrue(promotionCardCaptureScript.contains("promotion-card-v13"))
+        assertTrue(promotionCardCaptureScript.contains("tags?"))
+        assertTrue(promotionCardCaptureScript.contains("badges?"))
+        assertTrue(promotionCardCaptureScript.contains("second"))
     }
 }
