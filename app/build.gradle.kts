@@ -14,8 +14,8 @@ android {
         applicationId = "com.lisofer.smartsupermarketdeals"
         minSdk = 24
         targetSdk = 36
-        versionCode = 27
-        versionName = "1.4.2"
+        versionCode = 28
+        versionName = "1.4.3"
     }
 
     buildTypes {
