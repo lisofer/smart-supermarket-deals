@@ -12,7 +12,9 @@ class CategoryFirstCoverageTest {
         assertTrue(exhaustiveCatalogScript.contains("window.__smartDealsCatalogResponseV14 = true"))
         assertTrue(exhaustiveCatalogScript.contains("v122BootstrapComplete"))
         assertTrue(exhaustiveCatalogScript.contains("window.__smartDealsSearchFinished"))
-        assertTrue(exhaustiveCatalogScript.contains("event: 'coverage_complete'"))
+        assertTrue(exhaustiveCatalogScript.contains("event: 'explore_complete'"))
+        assertTrue(exhaustiveCatalogScript.contains("coverageComplete: true"))
+        assertFalse(exhaustiveCatalogScript.contains("event: 'coverage_complete'"))
         assertFalse(exhaustiveCatalogScript.contains("__smartDealsCrawlerV14State"))
         assertFalse(exhaustiveCatalogScript.contains("MAX_PENDING_ROUTES"))
     }
