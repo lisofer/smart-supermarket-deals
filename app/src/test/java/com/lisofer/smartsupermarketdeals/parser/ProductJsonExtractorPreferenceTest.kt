@@ -8,16 +8,18 @@ import org.junit.Test
 
 class ProductJsonExtractorPreferenceTest {
     @Test
-    fun weakerSpecificMechanicDoesNotReplaceRicherLegacyRecord() {
+    fun weakerInheritedMechanicDoesNotReplaceRicherLegacyRecord() {
         val direct = product(
             kind = PromotionKind.DIRECT_PERCENT,
             effectivePercent = 70.0,
             label = "70% OFF",
+            evidence = PromotionEvidence.PRODUCT_TEXT,
         )
         val secondUnit = product(
             kind = PromotionKind.SECOND_UNIT,
             effectivePercent = 35.0,
             label = "2da unidad 70% OFF",
+            evidence = PromotionEvidence.INHERITED_SECTION,
         )
 
         val selected = ProductJsonExtractor.prefer(direct, secondUnit)
@@ -27,16 +29,18 @@ class ProductJsonExtractorPreferenceTest {
     }
 
     @Test
-    fun explicitMechanicStillWinsAnExactInformationTie() {
+    fun explicitMechanicWithEqualEvidenceCorrectsAmbiguousDirectRecord() {
         val direct = product(
             kind = PromotionKind.DIRECT_PERCENT,
             effectivePercent = 70.0,
-            label = "70% OFF",
+            label = "1 ud. al 70% dto",
+            evidence = PromotionEvidence.PRODUCT_TEXT,
         )
         val secondUnit = product(
             kind = PromotionKind.SECOND_UNIT,
-            effectivePercent = 70.0,
+            effectivePercent = 35.0,
             label = "2da unidad 70% OFF",
+            evidence = PromotionEvidence.PRODUCT_TEXT,
         )
 
         val selected = ProductJsonExtractor.prefer(direct, secondUnit)
@@ -49,6 +53,7 @@ class ProductJsonExtractorPreferenceTest {
         kind: PromotionKind,
         effectivePercent: Double,
         label: String,
+        evidence: PromotionEvidence,
     ) = CapturedProduct(
         key = "product-1",
         name = "Producto",
@@ -61,6 +66,6 @@ class ProductJsonExtractorPreferenceTest {
         effectiveDiscountPercent = effectivePercent,
         promotionKind = kind,
         sourceUrl = "https://www.pedidosya.com.ar/",
-        promotionEvidence = PromotionEvidence.PRODUCT_TEXT,
+        promotionEvidence = evidence,
     )
 }
