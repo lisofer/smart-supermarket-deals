@@ -133,7 +133,7 @@ class PromotionScanService : Service() {
         val failures = mutableListOf<String>()
         val emptyStores = mutableListOf<String>()
 
-        stores.forEachIndexed { index, store ->
+        for ((index, store) in stores.withIndex()) {
             if (!serviceScope.isActive) throw CancellationException()
 
             BackgroundScanCoordinator.update {
@@ -256,7 +256,7 @@ class PromotionScanService : Service() {
         fun flushPayloads() {
             if (payloadBuffer.isEmpty()) return
             val array = JSONArray()
-            payloadBuffer.forEach(array::put)
+            payloadBuffer.forEach { array.put(it) }
             payloadBuffer.clear()
             bufferedChars = 0
 
