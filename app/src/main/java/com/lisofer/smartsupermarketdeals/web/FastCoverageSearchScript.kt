@@ -9,11 +9,11 @@ internal val fastCoverageSearchTerms: List<String> = buildList {
             "jugo", "nectar", "bebida", "energizante", "isotonica", "cerveza", "vino",
             "espumante", "fernet", "aperitivo", "cafe", "te", "mate", "yerba", "cacao",
 
-            // Lácteos, desayuno y panificados
+            // Lácteos, desayuno, panificados y golosinas
             "leche", "yogur", "queso", "manteca", "crema", "postre", "dulce de leche",
             "huevo", "pan", "tostada", "galletita", "bizcocho", "budin", "alfajor",
-            "chocolate", "golosina", "caramelo", "chicle", "cereal", "granola", "avena",
-            "mermelada", "miel", "snack", "papas fritas",
+            "chocolate", "chocolate blanco", "golosina", "caramelo", "chicle", "cereal",
+            "granola", "avena", "mermelada", "miel", "snack", "papas fritas",
 
             // Almacén
             "arroz", "fideos", "pasta", "harina", "polenta", "semola", "rebozador",
@@ -41,32 +41,30 @@ internal val fastCoverageSearchTerms: List<String> = buildList {
             "bebe", "formula infantil", "algodon", "afeitadora", "maquina de afeitar",
             "mascota", "perro", "gato", "alimento balanceado", "arena sanitaria",
 
-            // Señales comerciales que a veces exponen carruseles promocionales propios
+            // Señales comerciales y mecánicas promocionales
             "oferta", "ofertas", "promo", "promocion", "descuento", "ahorro", "2x1",
+            "3x2", "segunda unidad", "2da unidad",
 
-            // Marcas frecuentes que recuperan productos omitidos por el ranking general
-            "coca cola", "pepsi", "sprite", "fanta", "quilmes", "brahma", "manaos",
-            "la serenisima", "sancor", "milkaut", "danone", "casanto", "arcor", "bagley",
-            "terrabusi", "aguila", "molinos", "lucchetti", "matarazzo", "natura", "knorr",
-            "hellmanns", "cocinero", "marolio", "dia", "carrefour", "skip", "ala", "cif",
+            // Marcas frecuentes. Incluye Milka explícitamente por el caso real reportado.
+            "milka", "cadbury", "cofler", "bon o bon", "arcor", "bagley", "terrabusi",
+            "aguila", "coca cola", "pepsi", "sprite", "fanta", "quilmes", "brahma",
+            "manaos", "la serenisima", "sancor", "milkaut", "danone", "casanto",
+            "molinos", "lucchetti", "matarazzo", "natura", "knorr", "hellmanns",
+            "cocinero", "marolio", "dia", "carrefour", "skip", "ala", "cif",
             "magistral", "ayudin", "dove", "sedal", "pantene", "rexona", "colgate",
             "oral b", "elite", "higienol", "pampers", "huggies", "pedigree", "whiskas",
         )
     )
 
-    // Prefijos de dos letras con vocal: amplían cobertura sin disparar las 676 combinaciones.
+    // Todas las combinaciones de dos letras. Una búsqueda no se corta por coincidencias globales.
+    val alphabet = "abcdefghijklmnopqrstuvwxyz"
     addAll(
-        "abcdefghijklmnopqrstuv".flatMap { first ->
-            "aeiou".map { second -> "$first$second" }
+        alphabet.flatMap { first ->
+            alphabet.map { second -> "$first$second" }
         }
     )
-    addAll(
-        listOf(
-            "ch", "ll", "rr", "br", "cr", "dr", "fr", "gr", "pr", "tr",
-            "bl", "cl", "fl", "gl", "pl", "sl", "sc", "sp", "st",
-        )
-    )
-    addAll(('a'..'z').map(Char::toString))
+    addAll(alphabet.map(Char::toString))
+    add("ñ")
     addAll(('0'..'9').map(Char::toString))
 }.distinct()
 
@@ -74,28 +72,27 @@ private val fastCoverageTermsLiteral = fastCoverageSearchTerms
     .joinToString(prefix = "[", postfix = "]") { term -> "\"$term\"" }
 
 /**
- * Busca primero el catálogo general y luego rellena huecos con familias, marcas, letras y prefijos.
- * Las consultas secundarias solo siguen paginando mientras agregan productos que todavía no habían
- * aparecido, de modo que ampliar la cobertura no implique recorrer páginas repetidas indefinidamente.
+ * Recorre el catálogo general y después agota cada búsqueda estratégica por separado.
+ * Todos los productos viajan al analizador de Android; la decisión de qué producto es una
+ * promoción se toma después, con toda la evidencia disponible.
  */
 internal val fastCoverageSearchScript = """
 (() => {
-  if (window.__smartDealsFastCoverageV18) return;
-  window.__smartDealsFastCoverageV18 = true;
+  if (window.__smartDealsFastCoverageV19) return;
+  window.__smartDealsFastCoverageV19 = true;
 
   const SEARCH_TERMS = $fastCoverageTermsLiteral;
   const TEMPLATE_PREFIXES = [
     '__smartDealsEndpointTemplateV12:',
     '__smartDealsEndpointTemplateV11:'
   ];
-  const CONCURRENCY = 12;
-  const MAX_REQUESTS = 800;
-  const MAX_PRIMARY_PAGES = 100;
-  const MAX_SECONDARY_PAGES = 16;
-  const NOVELTY_STOP_PAGES = 2;
+  const CONCURRENCY = 18;
+  const MAX_REQUESTS = 4500;
+  const MAX_PRIMARY_PAGES = 180;
+  const MAX_PAGES_PER_QUERY = 60;
   const TEMPLATE_WAIT_MS = 30000;
   const FALLBACK_WAIT_MS = 240000;
-  const WATCHDOG_MS = 330000;
+  const WATCHDOG_MS = 840000;
 
   const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
   const clean = value => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
@@ -117,6 +114,15 @@ internal val fastCoverageSearchScript = """
       }
     } catch (_) {}
   };
+  const hashText = raw => {
+    const source = String(raw || '');
+    let hash = 2166136261;
+    for (let index = 0; index < source.length; index += 1) {
+      hash ^= source.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return source.length + '|' + (hash >>> 0).toString(16);
+  };
 
   let storeRoot = '';
   let active = false;
@@ -125,6 +131,8 @@ internal val fastCoverageSearchScript = """
   let requestCount = 0;
   let successfulResponses = 0;
   let progressStep = 0;
+  const catalogSeen = new Set();
+  const emittedProductVariants = new Set();
   const originalStartExplore = window.__smartDealsStartExplore;
   const previousSetRoot = window.__smartDealsSetRoot;
 
@@ -139,29 +147,8 @@ internal val fastCoverageSearchScript = """
     event: 'explore_progress',
     step: ++progressStep,
     phase,
-    fastCoverage: true,
+    exhaustiveCoverage: true,
   }, extra || {}));
-
-  const responseFingerprints = new Set();
-  const catalogSeen = new Set();
-  const promotionBest = new Map();
-  let globalPromotionCount = 0;
-
-  const finish = extra => {
-    if (finished) return;
-    finished = true;
-    active = false;
-    if (watchdog) clearTimeout(watchdog);
-    window.__smartDealsSearchFinished = true;
-    post(Object.assign({
-      event: 'coverage_complete',
-      requests: requestCount,
-      promotionSignals: globalPromotionCount,
-      catalogProducts: catalogSeen.size,
-      strategicQueries: SEARCH_TERMS.length,
-      fastCoverage: true,
-    }, extra || {}));
-  };
 
   const rootHash = () => {
     const source = absolute(storeRoot || location.href);
@@ -171,6 +158,36 @@ internal val fastCoverageSearchScript = """
       hash = Math.imul(hash, 16777619);
     }
     return (hash >>> 0).toString(16);
+  };
+  const resumeKey = () => '__smartDealsExhaustiveV19:' + rootHash();
+  const loadResumeState = () => {
+    try {
+      const state = JSON.parse(localStorage.getItem(resumeKey()) || 'null');
+      if (state && Array.isArray(state.completedTerms)) return state;
+    } catch (_) {}
+    return { primaryDone: false, completedTerms: [] };
+  };
+  const saveResumeState = state => {
+    try { localStorage.setItem(resumeKey(), JSON.stringify(state)); } catch (_) {}
+  };
+  const clearResumeState = () => {
+    try { localStorage.removeItem(resumeKey()); } catch (_) {}
+  };
+
+  const finish = extra => {
+    if (finished) return;
+    finished = true;
+    active = false;
+    if (watchdog) clearTimeout(watchdog);
+    window.__smartDealsSearchFinished = true;
+    clearResumeState();
+    post(Object.assign({
+      event: 'coverage_complete',
+      requests: requestCount,
+      catalogProducts: catalogSeen.size,
+      strategicQueries: SEARCH_TERMS.length,
+      exhaustiveCoverage: true,
+    }, extra || {}));
   };
 
   const templateKeys = () => TEMPLATE_PREFIXES.map(prefix => prefix + rootHash());
@@ -290,7 +307,6 @@ internal val fastCoverageSearchScript = """
     'productid', 'product_id', 'itemid', 'item_id', 'sku', 'skuid', 'sku_id',
     'barcode', 'gtin', 'ean', 'id'
   ];
-  const IMAGE_KEYS = ['image', 'imageurl', 'image_url', 'picture', 'thumbnail', 'photo'];
   const BRAND_KEYS = ['brand', 'brandname', 'brand_name', 'manufacturer'];
   const SIZE_KEYS = ['presentation', 'size', 'pack', 'unit', 'variant'];
   const TOTAL_KEYS = [
@@ -339,13 +355,21 @@ internal val fastCoverageSearchScript = """
     const name = directValue(object, NAME_KEYS);
     return typeof name === 'string' && clean(name).length >= 2 && nestedPrice(object) != null;
   };
+  const catalogSignature = product => {
+    const id = clean(directValue(product, ID_KEYS));
+    if (id) return 'id|' + id;
+    const name = fold(directValue(product, NAME_KEYS));
+    const brand = fold(directValue(product, BRAND_KEYS));
+    const size = fold(directValue(product, SIZE_KEYS));
+    return 'name|' + name + '|' + brand + '|' + size;
+  };
 
   const compact = (value, depth, insidePromo) => {
     if (value == null || depth > 10) return null;
-    if (typeof value === 'string') return value.slice(0, 1000);
+    if (typeof value === 'string') return value.slice(0, 1200);
     if (typeof value === 'number' || typeof value === 'boolean') return value;
     if (Array.isArray(value)) {
-      return value.slice(0, 150).map(child => compact(child, depth + 1, insidePromo));
+      return value.slice(0, 180).map(child => compact(child, depth + 1, insidePromo));
     }
     if (typeof value !== 'object') return null;
     const output = {};
@@ -358,43 +382,10 @@ internal val fastCoverageSearchScript = """
     }
     return output;
   };
-
-  const sectionPromotion = object => {
-    if (!object || typeof object !== 'object' || Array.isArray(object)) return null;
-    if (!Object.keys(object).some(productCollectionKey)) return null;
-    const snapshot = {};
-    for (const key of Object.keys(object)) {
-      if (productCollectionKey(key)) continue;
-      const value = object[key];
-      if (promoKey(key)) snapshot[key] = compact(value, 0, true);
-      if (typeof value === 'string' && promotionSignal.test(fold(value))) {
-        snapshot[key] = value.slice(0, 600);
-      }
-    }
-    const text = JSON.stringify(snapshot);
-    if (!text || !promotionSignal.test(fold(text))) return null;
-    snapshot.__smartDealsInherited = true;
-    return snapshot;
-  };
-
-  const catalogSignature = product => {
-    const id = clean(directValue(product, ID_KEYS));
-    if (id) return 'id|' + id;
-    const name = fold(directValue(product, NAME_KEYS));
-    const brand = fold(directValue(product, BRAND_KEYS));
-    const size = fold(directValue(product, SIZE_KEYS));
-    return 'name|' + name + '|' + brand + '|' + size;
-  };
-  const promotionSignature = product => {
-    const base = catalogSignature(product);
-    const price = clean(nestedPrice(product));
-    const image = clean(directValue(product, IMAGE_KEYS));
-    return base + '|' + price + '|' + image.slice(0, 100);
-  };
   const hasPublishedOldPrice = (node, depth) => {
     if (!node || typeof node !== 'object' || depth > 8) return false;
     if (Array.isArray(node)) {
-      return node.slice(0, 100).some(child => hasPublishedOldPrice(child, depth + 1));
+      return node.slice(0, 120).some(child => hasPublishedOldPrice(child, depth + 1));
     }
     for (const key of Object.keys(node)) {
       const value = node[key];
@@ -406,26 +397,34 @@ internal val fastCoverageSearchScript = """
     }
     return false;
   };
-  const productQuality = product => {
-    const text = JSON.stringify(product).slice(0, 20000);
-    let score = Object.keys(product || {}).length;
-    if (promotionSignal.test(fold(text))) score += 500;
-    if (hasPublishedOldPrice(product, 0)) score += 400;
-    if (/(?:tags?|badges?).{0,600}(?:label|text)/i.test(text)) score += 250;
-    if (product.__smartDealsSectionPromotion) score += 150;
-    return score;
+  const sectionPromotion = object => {
+    if (!object || typeof object !== 'object' || Array.isArray(object)) return null;
+    if (!Object.keys(object).some(productCollectionKey)) return null;
+    const snapshot = {};
+    for (const key of Object.keys(object)) {
+      if (productCollectionKey(key)) continue;
+      const value = object[key];
+      if (promoKey(key)) snapshot[key] = compact(value, 0, true);
+      if (typeof value === 'string' && promotionSignal.test(fold(value))) {
+        snapshot[key] = value.slice(0, 800);
+      }
+    }
+    const text = JSON.stringify(snapshot);
+    if (!text || !promotionSignal.test(fold(text))) return null;
+    snapshot.__smartDealsInherited = true;
+    return snapshot;
   };
 
   const collect = root => {
-    const promotional = [];
-    const catalogSignatures = new Set();
+    const products = [];
+    const signatures = new Set();
     const stack = [{ value: root, inherited: null, depth: 0 }];
     let visited = 0;
-    while (stack.length > 0 && visited < 200000 && catalogSignatures.size < 30000) {
+    while (stack.length > 0 && visited < 250000 && signatures.size < 50000) {
       const entry = stack.pop();
       visited += 1;
       const value = entry && entry.value;
-      if (!value || typeof value !== 'object' || entry.depth > 30) continue;
+      if (!value || typeof value !== 'object' || entry.depth > 32) continue;
       if (Array.isArray(value)) {
         for (let index = value.length - 1; index >= 0; index -= 1) {
           stack.push({ value: value[index], inherited: entry.inherited, depth: entry.depth + 1 });
@@ -434,16 +433,16 @@ internal val fastCoverageSearchScript = """
       }
 
       if (looksLikeProduct(value)) {
-        const signature = catalogSignature(value);
-        if (signature && signature !== 'name|||') catalogSignatures.add(signature);
         const product = compact(value, 0, false) || {};
-        const text = JSON.stringify(product).slice(0, 22000);
+        const signature = catalogSignature(product);
+        if (signature && signature !== 'name|||') signatures.add(signature);
+        const text = JSON.stringify(product).slice(0, 26000);
         const ownPromotion = promotionSignal.test(fold(text)) || hasPublishedOldPrice(product, 0);
-        if (entry.inherited && !ownPromotion) product.__smartDealsSectionPromotion = entry.inherited;
-        if (ownPromotion || entry.inherited) {
-          product.source = 'strategic-coverage-v18';
-          promotional.push(product);
+        if (entry.inherited && !ownPromotion) {
+          product.__smartDealsSectionPromotion = entry.inherited;
         }
+        product.source = 'exhaustive-products-v19';
+        products.push(product);
       }
 
       const localPromotion = sectionPromotion(value);
@@ -456,7 +455,7 @@ internal val fastCoverageSearchScript = """
         stack.push({ value: child, inherited, depth: entry.depth + 1 });
       }
     }
-    return { promotional, catalogSignatures: Array.from(catalogSignatures) };
+    return { products, signatures: Array.from(signatures) };
   };
 
   const metadata = root => {
@@ -465,19 +464,19 @@ internal val fastCoverageSearchScript = """
     let total = null;
     let hasNext = null;
     let nextCursor = null;
-    while (queue.length > 0 && visited < 60000) {
+    while (queue.length > 0 && visited < 80000) {
       const value = queue.shift();
       visited += 1;
       if (!value || typeof value !== 'object') continue;
       if (Array.isArray(value)) {
-        for (let index = 0; index < Math.min(value.length, 600); index += 1) queue.push(value[index]);
+        for (let index = 0; index < Math.min(value.length, 800); index += 1) queue.push(value[index]);
         continue;
       }
       for (const key of Object.keys(value)) {
         const child = value[key];
         if (keyEquals(key, TOTAL_KEYS)) {
           const number = Number(child);
-          if (Number.isFinite(number) && number >= 0 && number <= 300000) {
+          if (Number.isFinite(number) && number >= 0 && number <= 500000) {
             total = total == null ? number : Math.max(total, number);
           }
         }
@@ -489,35 +488,25 @@ internal val fastCoverageSearchScript = """
     return { total, hasNext, nextCursor };
   };
 
-  const emitProducts = (url, products) => {
+  const emitAllProducts = (url, products) => {
     const fresh = [];
     for (const product of products || []) {
-      const signature = promotionSignature(product);
-      if (!signature || signature === 'name||||') continue;
-      const quality = productQuality(product);
-      const previous = promotionBest.get(signature);
-      if (previous != null && previous >= quality) continue;
-      promotionBest.set(signature, quality);
-      if (previous == null) globalPromotionCount += 1;
+      const signature = catalogSignature(product);
+      if (!signature || signature === 'name|||') continue;
+      catalogSeen.add(signature);
+      const text = JSON.stringify(product);
+      const variantKey = signature + '|' + hashText(text);
+      if (emittedProductVariants.has(variantKey)) continue;
+      emittedProductVariants.add(variantKey);
       fresh.push(product);
     }
-    for (let index = 0; index < fresh.length; index += 40) {
+    for (let index = 0; index < fresh.length; index += 30) {
       post({
-        url: url + '#strategic-coverage-' + index,
-        body: JSON.stringify({ products: fresh.slice(index, index + 40) }),
+        url: url + '#exhaustive-products-' + index,
+        body: JSON.stringify({ products: fresh.slice(index, index + 30) }),
       });
     }
     return fresh.length;
-  };
-
-  const responseFingerprint = text => {
-    const source = String(text || '');
-    let hash = 2166136261;
-    for (let index = 0; index < source.length; index += 1) {
-      hash ^= source.charCodeAt(index);
-      hash = Math.imul(hash, 16777619);
-    }
-    return source.length + '|' + (hash >>> 0).toString(16);
   };
 
   const fetchQuery = async (template, query, pageIndex, cursor) => {
@@ -536,211 +525,112 @@ internal val fastCoverageSearchScript = """
       });
       const text = await response.text();
       if (!response.ok || !text) return null;
-      const fingerprint = responseFingerprint(text);
-      if (responseFingerprints.has(fingerprint)) {
-        return {
-          query,
-          pageIndex,
-          catalogProducts: 0,
-          newCatalogProducts: 0,
-          freshPromotions: 0,
-          total: null,
-          hasNext: false,
-          nextCursor: null,
-          limit: built.limit,
-          duplicate: true,
-        };
-      }
-      responseFingerprints.add(fingerprint);
       const root = JSON.parse(text);
       const collected = collect(root);
       const pageMetadata = metadata(root);
-      let newCatalogProducts = 0;
-      for (const signature of collected.catalogSignatures) {
-        if (!catalogSeen.has(signature)) {
-          catalogSeen.add(signature);
-          newCatalogProducts += 1;
-        }
-      }
-      const freshPromotions = emitProducts(built.url, collected.promotional);
+      emitAllProducts(built.url, collected.products);
       successfulResponses += 1;
       return {
         query,
         pageIndex,
-        catalogProducts: collected.catalogSignatures.length,
-        newCatalogProducts,
-        freshPromotions,
+        fingerprint: hashText(text),
+        catalogProducts: collected.signatures.length,
         total: pageMetadata.total,
         hasNext: pageMetadata.hasNext,
         nextCursor: pageMetadata.nextCursor,
         limit: built.limit,
-        duplicate: false,
       };
     } catch (_) {
       return null;
     }
   };
 
-  const runInBatches = async (items, worker, label) => {
-    const results = [];
-    for (let index = 0; index < items.length && requestCount < MAX_REQUESTS; index += CONCURRENCY) {
-      const batch = items.slice(index, index + CONCURRENCY);
-      const batchResults = await Promise.all(batch.map(worker));
-      results.push(...batchResults.filter(Boolean));
-      progress(label, {
-        requests: requestCount,
-        completed: Math.min(items.length, index + batch.length),
-        totalQueries: items.length,
-        catalogProducts: catalogSeen.size,
-        promotionSignals: globalPromotionCount,
-      });
-      await sleep(15);
-    }
-    return results;
-  };
-
   const hasPagination = template => Boolean(
     template.pagination &&
       (template.pagination.page || template.pagination.offset || template.pagination.cursor)
   );
-  const explicitMore = (result, cumulative) => result && (
-    result.hasNext === true ||
-    result.nextCursor != null ||
-    (result.total != null && cumulative < result.total)
-  );
-  const pageLooksFull = (result, baseline) => {
-    if (!result || result.catalogProducts <= 0) return false;
-    const threshold = Math.max(8, Math.floor(Math.max(1, baseline) * 0.65));
-    return result.catalogProducts >= threshold;
-  };
-  const shouldContinue = (result, cumulative, baseline, previousCursor) => {
-    if (!result || result.duplicate || result.catalogProducts <= 0) return false;
-    if (result.hasNext === false) return false;
-    if (result.total != null && cumulative >= result.total) return false;
-    if (result.nextCursor != null && previousCursor != null && result.nextCursor === previousCursor) {
-      return false;
-    }
-    return explicitMore(result, cumulative) || pageLooksFull(result, baseline);
-  };
 
-  const exhaustPrimary = async (template, first) => {
-    if (!first || !hasPagination(template)) return;
-    let current = first;
-    let cumulative = first.catalogProducts;
-    const baseline = Math.max(1, first.catalogProducts);
+  const exhaustQuery = async (template, query, maximumPages) => {
+    const seenPages = new Set();
+    let pageIndex = 0;
+    let cursor = null;
     let previousCursor = null;
+    let cumulative = 0;
 
-    while (
-      current.pageIndex + 1 < MAX_PRIMARY_PAGES &&
-      requestCount < MAX_REQUESTS &&
-      shouldContinue(current, cumulative, baseline, previousCursor)
-    ) {
-      previousCursor = current.nextCursor;
-      const next = await fetchQuery(
-        template,
-        current.query,
-        current.pageIndex + 1,
-        current.nextCursor,
-      );
-      if (!next) break;
-      current = next;
-      cumulative += next.catalogProducts;
-      progress('Completando todas las páginas del catálogo general…', {
+    while (pageIndex < maximumPages && requestCount < MAX_REQUESTS) {
+      const result = await fetchQuery(template, query, pageIndex, cursor);
+      if (!result) return false;
+      if (seenPages.has(result.fingerprint)) return true;
+      seenPages.add(result.fingerprint);
+      cumulative += result.catalogProducts;
+
+      progress('Agotando búsqueda: ' + (query || 'catálogo general'), {
+        query,
+        page: pageIndex + 1,
         requests: requestCount,
         catalogProducts: catalogSeen.size,
-        promotionSignals: globalPromotionCount,
       });
-    }
-  };
 
-  const exhaustSecondary = async (template, seeds) => {
-    if (!hasPagination(template)) return;
-    let activePages = [];
-
-    for (const seed of seeds || []) {
-      if (!seed || seed.duplicate || seed.catalogProducts <= 0) continue;
-      const state = {
-        result: seed,
-        baseline: Math.max(1, seed.catalogProducts),
-        cumulative: seed.catalogProducts,
-        noNovelty: seed.newCatalogProducts === 0 ? 1 : 0,
-        previousCursor: null,
-      };
+      if (result.catalogProducts <= 0) return true;
+      if (!hasPagination(template)) return true;
+      if (result.hasNext === false) return true;
+      if (result.total != null && cumulative >= result.total) return true;
       if (
-        state.noNovelty < NOVELTY_STOP_PAGES &&
-        shouldContinue(seed, state.cumulative, state.baseline, null)
-      ) {
-        activePages.push(state);
-      }
+        result.nextCursor != null &&
+        previousCursor != null &&
+        result.nextCursor === previousCursor
+      ) return true;
+
+      previousCursor = cursor;
+      cursor = result.nextCursor;
+      pageIndex += 1;
     }
-
-    while (activePages.length > 0 && requestCount < MAX_REQUESTS) {
-      const inputs = activePages
-        .filter(state => state.result.pageIndex + 1 < MAX_SECONDARY_PAGES)
-        .map(state => ({
-          state,
-          query: state.result.query,
-          pageIndex: state.result.pageIndex + 1,
-          cursor: state.result.nextCursor,
-        }));
-      if (inputs.length === 0) break;
-
-      const pages = await runInBatches(
-        inputs,
-        input => fetchQuery(template, input.query, input.pageIndex, input.cursor)
-          .then(result => ({ input, result })),
-        'Profundizando únicamente búsquedas que siguen aportando productos…',
-      );
-      activePages = [];
-
-      for (const pair of pages) {
-        if (!pair || !pair.result) continue;
-        const state = pair.input.state;
-        const page = pair.result;
-        state.previousCursor = state.result.nextCursor;
-        state.result = page;
-        state.cumulative += page.catalogProducts;
-        state.noNovelty = page.newCatalogProducts === 0 ? state.noNovelty + 1 : 0;
-        if (
-          state.noNovelty < NOVELTY_STOP_PAGES &&
-          shouldContinue(page, state.cumulative, state.baseline, state.previousCursor)
-        ) {
-          activePages.push(state);
-        }
-      }
-    }
+    return pageIndex >= maximumPages;
   };
 
   const runCoverage = async template => {
     requestCount = 0;
     successfulResponses = 0;
-    responseFingerprints.clear();
     catalogSeen.clear();
-    promotionBest.clear();
-    globalPromotionCount = 0;
+    emittedProductVariants.clear();
 
-    const terms = Array.from(new Set(SEARCH_TERMS));
-    let primaryTerm = '';
-    progress('Leyendo el catálogo general…');
-    let primary = await fetchQuery(template, primaryTerm, 0, null);
-    if (!primary || primary.catalogProducts < 2) {
-      primaryTerm = clean(template.query && template.query.sample);
-      if (!primaryTerm) return false;
-      primary = await fetchQuery(template, primaryTerm, 0, null);
+    const state = loadResumeState();
+    const completedTerms = new Set(state.completedTerms || []);
+
+    if (!state.primaryDone) {
+      progress('Buscando todos los productos del catálogo general…');
+      const primaryComplete = await exhaustQuery(template, '', MAX_PRIMARY_PAGES);
+      if (!primaryComplete || successfulResponses === 0) return false;
+      state.primaryDone = true;
+      saveResumeState(state);
     }
-    if (!primary || primary.catalogProducts < 2 || successfulResponses === 0) return false;
-    await exhaustPrimary(template, primary);
 
-    const secondaryTerms = terms.filter(term => term !== primaryTerm);
-    const firstPages = await runInBatches(
-      secondaryTerms,
-      term => fetchQuery(template, term, 0, null),
-      'Buscando huecos por rubros, marcas, letras y prefijos…',
-    );
-    await exhaustSecondary(template, firstPages);
+    const terms = Array.from(new Set(SEARCH_TERMS))
+      .filter(term => term !== '' && !completedTerms.has(term));
 
-    await sleep(700);
-    return true;
+    for (let index = 0; index < terms.length && requestCount < MAX_REQUESTS; index += CONCURRENCY) {
+      const batch = terms.slice(index, index + CONCURRENCY);
+      const outcomes = await Promise.all(
+        batch.map(async term => ({ term, complete: await exhaustQuery(template, term, MAX_PAGES_PER_QUERY) }))
+      );
+      for (const outcome of outcomes) {
+        if (outcome.complete) completedTerms.add(outcome.term);
+      }
+      state.completedTerms = Array.from(completedTerms);
+      saveResumeState(state);
+      progress('Lote completo: buscando todos los productos sin saltear variantes…', {
+        requests: requestCount,
+        completed: completedTerms.size,
+        totalQueries: SEARCH_TERMS.length - 1,
+        catalogProducts: catalogSeen.size,
+      });
+      await sleep(20);
+    }
+
+    const allComplete = SEARCH_TERMS
+      .filter(term => term !== '')
+      .every(term => completedTerms.has(term));
+    return allComplete;
   };
 
   const fallbackFinished = () => {
@@ -757,30 +647,36 @@ internal val fastCoverageSearchScript = """
     if (active) return;
     active = true;
     finished = false;
-    post({ event: 'coverage_started', fastCoverage: true });
-    watchdog = setTimeout(() => finish({ watchdog: true }), WATCHDOG_MS);
+    post({ event: 'coverage_started', exhaustiveCoverage: true });
+    watchdog = setTimeout(() => {
+      post({
+        event: 'explore_progress',
+        phase: 'La búsqueda sigue activa; Android puede reiniciar el motor y retomar el lote guardado…',
+        exhaustiveCoverage: true,
+      });
+    }, WATCHDOG_MS);
 
     try {
       let template = loadTemplate();
       if (template) {
         progress('Usando la consulta interna guardada…');
-        const worked = await runCoverage(template);
-        if (worked) {
-          finish({ endpointCoverage: true, adaptive: true, strategic: true });
+        const complete = await runCoverage(template);
+        if (complete) {
+          finish({ endpointCoverage: true, exhaustive: true, allQueriesCompleted: true });
           return;
         }
-        removeTemplates();
       }
 
+      removeTemplates();
       progress('Aprendiendo el buscador interno de esta tienda…');
       if (typeof originalStartExplore === 'function') {
         try { originalStartExplore(); } catch (_) {}
       }
       template = await waitForTemplate(TEMPLATE_WAIT_MS);
       if (template) {
-        const worked = await runCoverage(template);
-        if (worked) {
-          finish({ endpointCoverage: true, learnedNow: true, adaptive: true, strategic: true });
+        const complete = await runCoverage(template);
+        if (complete) {
+          finish({ endpointCoverage: true, learnedNow: true, exhaustive: true, allQueriesCompleted: true });
           return;
         }
       }
@@ -790,7 +686,7 @@ internal val fastCoverageSearchScript = """
       while (Date.now() < deadline && !fallbackFinished()) await sleep(500);
       finish({ endpointFallback: true });
     } catch (_) {
-      finish({ failedSafely: true });
+      progress('El motor web se reiniciará y retomará el último lote guardado…');
     }
   };
 })();
