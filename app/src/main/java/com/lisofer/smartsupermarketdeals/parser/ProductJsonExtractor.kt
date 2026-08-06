@@ -65,11 +65,11 @@ object ProductJsonExtractor {
     }
 
     /**
-     * Keeps the retention order used by version 1.2.2. A later, more specific mechanic may break
-     * an exact tie, but it no longer replaces a richer product record merely for saying
-     * "segunda unidad". This preserves the broad direct-discount coverage that worked in 1.2.2
-     * while the badge capture and canonicalizer still correct labels when their evidence is equal
-     * or stronger.
+     * Uses the same evidence and information factors as version 1.2.2, now grouped explicitly so
+     * Kotlin cannot associate an `else` with the following addition. A more specific mechanic may
+     * break an exact tie, but it cannot replace a richer product record merely for saying
+     * "segunda unidad". Badge capture and canonicalization still correct labels when their
+     * evidence is equal or stronger.
      */
     private fun qualityScore(product: CapturedProduct): Double {
         val evidence = when (product.promotionEvidence) {
@@ -80,9 +80,9 @@ object ProductJsonExtractor {
             null -> 0.0
         }
         return evidence +
-            if (product.promotionCategory != null) 500.0 else 0.0 +
-            if (!product.promoLabel.isNullOrBlank()) 100.0 else 0.0 +
-            if (product.originalPrice != null) 50.0 else 0.0 +
+            (if (product.promotionCategory != null) 500.0 else 0.0) +
+            (if (!product.promoLabel.isNullOrBlank()) 100.0 else 0.0) +
+            (if (product.originalPrice != null) 50.0 else 0.0) +
             (product.effectiveDiscountPercent ?: 0.0).coerceAtMost(100.0)
     }
 
