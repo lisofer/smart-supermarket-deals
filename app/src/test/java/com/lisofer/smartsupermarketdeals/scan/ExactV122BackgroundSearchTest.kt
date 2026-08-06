@@ -28,9 +28,10 @@ class ExactV122BackgroundSearchTest {
     }
 
     @Test
-    fun laterPromotionBadgeFixRemainsEnabled() {
+    fun laterPromotionBadgeEvidenceCaptureRemainsEnabled() {
         assertTrue(promotionCardCaptureScript.contains("promotion-card-v13"))
-        assertTrue(promotionCardCaptureScript.contains("SECOND_UNIT"))
+        assertTrue(promotionCardCaptureScript.contains("promoContainerKey"))
         assertTrue(promotionCardCaptureScript.contains("tags?"))
+        assertTrue(promotionCardCaptureScript.contains("badges?"))
     }
 }
