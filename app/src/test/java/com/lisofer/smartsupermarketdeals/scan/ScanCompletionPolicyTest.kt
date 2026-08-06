@@ -26,7 +26,7 @@ class ScanCompletionPolicyTest {
         val now = 20_000L
         assertFalse(
             ScanCompletionPolicy.shouldFinish(
-                searchFinishedAt = 10_000L,
+                searchFinishedAt = 15_000L,
                 lastPayloadAt = 19_000L,
                 pendingPayloads = 0,
                 now = now,
@@ -34,7 +34,7 @@ class ScanCompletionPolicyTest {
         )
         assertTrue(
             ScanCompletionPolicy.shouldFinish(
-                searchFinishedAt = 10_000L,
+                searchFinishedAt = 15_000L,
                 lastPayloadAt = now - ScanCompletionPolicy.FINAL_PAYLOAD_QUIET_MS,
                 pendingPayloads = 0,
                 now = now,
