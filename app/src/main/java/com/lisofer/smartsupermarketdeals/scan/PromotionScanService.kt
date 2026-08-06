@@ -8,13 +8,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
 import android.os.PowerManager
 import android.webkit.CookieManager
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -28,12 +24,11 @@ import com.lisofer.smartsupermarketdeals.data.CapturedProduct
 import com.lisofer.smartsupermarketdeals.data.DealsDatabase
 import com.lisofer.smartsupermarketdeals.data.Store
 import com.lisofer.smartsupermarketdeals.parser.ProductJsonExtractor
-import com.lisofer.smartsupermarketdeals.web.catalogResponseCaptureScript
 import com.lisofer.smartsupermarketdeals.web.exhaustiveCatalogScript
-import com.lisofer.smartsupermarketdeals.web.fastCoverageSearchScript
 import com.lisofer.smartsupermarketdeals.web.promotionCardCaptureScript
 import com.lisofer.smartsupermarketdeals.web.searchEndpointHarvesterScript
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
@@ -50,8 +45,6 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
-import org.json.JSONArray
 import org.json.JSONObject
 
 internal fun shouldPersistIncompleteScan(
@@ -109,10 +102,10 @@ class PromotionScanService : Service() {
             val notice = try {
                 runCompleteScan()
             } catch (_: CancellationException) {
-                "Búsqueda cancelada. Se conservaron los resultados ya guardados."
+                "Búsqueda cancelada. Se conservaron los resultados anteriores."
             } catch (error: Throwable) {
                 "La búsqueda se interrumpió: ${error.message ?: "error inesperado"}. " +
-                    "Se conservaron los resultados obtenidos."
+                    "Se conservaron los resultados anteriores."
             }
 
             BackgroundScanCoordinator.finish(applicationContext, notice)
@@ -138,7 +131,6 @@ class PromotionScanService : Service() {
         BackgroundScanCoordinator.begin(applicationContext, stores.size)
         var totalPromotions = 0
         val failures = mutableListOf<String>()
-        val partialStores = mutableListOf<String>()
         val emptyStores = mutableListOf<String>()
 
         for ((index, store) in stores.withIndex()) {
@@ -168,19 +160,12 @@ class PromotionScanService : Service() {
                 database.saveScan(store.id, promotionalProducts)
             }
 
-            if (!result.completed) partialStores += store.name
             if (promotionalProducts.isEmpty()) emptyStores += store.name
             totalPromotions += promotionalProducts.size
 
             BackgroundScanCoordinator.update {
                 it.copy(
-                    status = buildString {
-                        append(store.name)
-                        append(": ")
-                        append(promotionalProducts.size)
-                        append(" promociones guardadas")
-                        if (!result.completed) append(" · recuperación parcial")
-                    },
+                    status = "${store.name}: ${promotionalProducts.size} promociones guardadas",
                     promotionsFound = totalPromotions,
                     pendingBatches = 0,
                 )
@@ -189,15 +174,10 @@ class PromotionScanService : Service() {
         }
 
         return when {
-            totalPromotions > 0 && failures.isEmpty() && partialStores.isEmpty() && emptyStores.isEmpty() ->
+            totalPromotions > 0 && failures.isEmpty() && emptyStores.isEmpty() ->
                 "Búsqueda terminada: se guardaron $totalPromotions promociones."
             totalPromotions > 0 -> buildString {
                 append("Búsqueda terminada: se guardaron $totalPromotions promociones.")
-                if (partialStores.isNotEmpty()) {
-                    append(" El motor web se reinició y se conservaron los resultados recuperados de: ")
-                    append(partialStores.joinToString())
-                    append(".")
-                }
                 if (emptyStores.isNotEmpty()) {
                     append(" Sin promociones en: ${emptyStores.joinToString()}.")
                 }
@@ -226,9 +206,8 @@ class PromotionScanService : Service() {
         }
 
         val products = ConcurrentHashMap<String, CapturedProduct>()
-        val pendingBatches = AtomicInteger(0)
+        val pendingPayloads = AtomicInteger(0)
         val payloadQueue = Channel<String>(Channel.UNLIMITED)
-        val deduplicator = PayloadDeduplicator()
         val consumer = launch(Dispatchers.Default) {
             for (payload in payloadQueue) {
                 ProductJsonExtractor.extract(payload).forEach { incoming ->
@@ -236,190 +215,104 @@ class PromotionScanService : Service() {
                         ProductJsonExtractor.prefer(current, incoming)
                     }
                 }
-                pendingBatches.updateAndGet { value -> (value - 1).coerceAtLeast(0) }
+                pendingPayloads.updateAndGet { value -> (value - 1).coerceAtLeast(0) }
                 publishStoreProgress(
                     store = store,
                     storeIndex = storeIndex,
                     storeCount = storeCount,
                     previousPromotions = previousPromotions,
                     products = products,
-                    pendingBatches = pendingBatches,
+                    pendingPayloads = pendingPayloads,
                     status = null,
                 )
             }
         }
 
-        var completed = false
-        var attempts = 0
-        while (!completed && attempts < MAX_WEBVIEW_ATTEMPTS && isActive) {
-            attempts += 1
-            val outcome = runWebViewAttempt(
+        val completed = try {
+            runLegacyV122WebView(
                 store = store,
                 storeIndex = storeIndex,
                 storeCount = storeCount,
                 previousPromotions = previousPromotions,
                 products = products,
-                pendingBatches = pendingBatches,
+                pendingPayloads = pendingPayloads,
                 payloadQueue = payloadQueue,
-                deduplicator = deduplicator,
-                attempt = attempts,
             )
-            completed = outcome == AttemptOutcome.COMPLETE
-            if (!completed && attempts < MAX_WEBVIEW_ATTEMPTS) {
-                publishStoreProgress(
-                    store,
-                    storeIndex,
-                    storeCount,
-                    previousPromotions,
-                    products,
-                    pendingBatches,
-                    "El motor web se detuvo; retomando categorías sin perder ${products.size} productos…",
-                )
-                delay(RESTART_DELAY_MS)
-            }
+        } finally {
+            payloadQueue.close()
+            joinAll(consumer)
         }
-
-        val drainDeadline = System.currentTimeMillis() + FINAL_DRAIN_TIMEOUT_MS
-        while (pendingBatches.get() > 0 && System.currentTimeMillis() < drainDeadline) {
-            delay(100)
-        }
-        payloadQueue.close()
-        joinAll(consumer)
 
         StoreScanResult(products.values.toList(), completed)
     }
 
-    private suspend fun runWebViewAttempt(
+    /**
+     * Exact version-1.2.2 search lifecycle inside a foreground service:
+     * one WebView, one start, no reload, no stall monitor, no replacement and no retry loop.
+     */
+    private suspend fun runLegacyV122WebView(
         store: Store,
         storeIndex: Int,
         storeCount: Int,
         previousPromotions: Int,
         products: ConcurrentHashMap<String, CapturedProduct>,
-        pendingBatches: AtomicInteger,
+        pendingPayloads: AtomicInteger,
         payloadQueue: Channel<String>,
-        deduplicator: PayloadDeduplicator,
-        attempt: Int,
-    ): AttemptOutcome = coroutineScope {
-        val handler = Handler(Looper.getMainLooper())
-        val completion = CompletableDeferred<AttemptOutcome>()
-        val lastActivityAt = AtomicLong(System.currentTimeMillis())
-        val payloadBuffer = mutableListOf<JSONObject>()
-        var bufferedChars = 0
-        var scriptReportedComplete = false
-        var coverageActive = false
-        var searchEnrichmentStarted = false
-        var crawlerInitialized = false
-        var reloads = 0
+    ): Boolean = coroutineScope {
+        check(LegacyV122ScanContract.WEBVIEW_INSTANCES_PER_STORE == 1)
+        check(!LegacyV122ScanContract.RELOAD_ON_STALL)
+        check(!LegacyV122ScanContract.RESTART_AFTER_TIMEOUT)
+        check(!LegacyV122ScanContract.CATEGORY_FIRST)
+        check(!LegacyV122ScanContract.STRATEGIC_COVERAGE)
+
+        val completion = CompletableDeferred<Boolean>()
+        val searchReportedComplete = AtomicBoolean(false)
+        val lastPayloadAt = AtomicLong(System.currentTimeMillis())
+        var completionWatcher: Job? = null
 
         fun verifiedCount(): Int = products.values.count(::isVerifiedPromotion)
 
         fun publish(status: String) {
             publishStoreProgress(
-                store,
-                storeIndex,
-                storeCount,
-                previousPromotions,
-                products,
-                pendingBatches,
-                status,
+                store = store,
+                storeIndex = storeIndex,
+                storeCount = storeCount,
+                previousPromotions = previousPromotions,
+                products = products,
+                pendingPayloads = pendingPayloads,
+                status = status,
             )
         }
 
-        fun flushPayloads() {
-            if (payloadBuffer.isEmpty()) return
-            val array = JSONArray()
-            payloadBuffer.forEach { array.put(it) }
-            payloadBuffer.clear()
-            bufferedChars = 0
-
-            val batch = JSONObject()
-                .put("event", "payload_batch")
-                .put("payloads", array)
-                .toString()
-            pendingBatches.incrementAndGet()
-            if (payloadQueue.trySend(batch).isFailure) {
-                pendingBatches.updateAndGet { value -> (value - 1).coerceAtLeast(0) }
+        fun watchForFinalPayloads() {
+            if (completionWatcher?.isActive == true) return
+            completionWatcher = launch {
+                while (isActive && !completion.isCompleted) {
+                    delay(100)
+                    val quietFor = System.currentTimeMillis() - lastPayloadAt.get()
+                    if (
+                        searchReportedComplete.get() &&
+                        pendingPayloads.get() == 0 &&
+                        quietFor >= FINAL_PAYLOAD_QUIET_MS
+                    ) {
+                        completion.complete(true)
+                    }
+                }
             }
-        }
-
-        val idleFlushRunnable = Runnable { flushPayloads() }
-        val completionRunnable = Runnable {
-            flushPayloads()
-            if (!completion.isCompleted) completion.complete(AttemptOutcome.COMPLETE)
-        }
-
-        fun scheduleCompletion() {
-            handler.removeCallbacks(completionRunnable)
-            handler.postDelayed(completionRunnable, COMPLETION_QUIET_MS)
-        }
-
-        fun queueEnvelope(envelope: JSONObject, rawLength: Int) {
-            val url = envelope.optString("url")
-            val body = envelope.optString("body")
-            if (body.isBlank() || !deduplicator.accept(url, body)) return
-
-            lastActivityAt.set(System.currentTimeMillis())
-            payloadBuffer += envelope
-            bufferedChars += rawLength
-            handler.removeCallbacks(idleFlushRunnable)
-            handler.postDelayed(idleFlushRunnable, PAYLOAD_IDLE_FLUSH_MS)
-
-            if (
-                payloadBuffer.size >= MAX_BUFFERED_PAYLOADS ||
-                bufferedChars >= MAX_BUFFERED_PAYLOAD_CHARS
-            ) {
-                handler.removeCallbacks(idleFlushRunnable)
-                flushPayloads()
-            }
-            if (scriptReportedComplete) scheduleCompletion()
         }
 
         val webView = WebView(this@PromotionScanService).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
             settings.databaseEnabled = true
-            settings.cacheMode = WebSettings.LOAD_DEFAULT
             settings.setSupportMultipleWindows(false)
-            settings.offscreenPreRaster = true
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
-            }
+            settings.cacheMode = WebSettings.LOAD_DEFAULT
             CookieManager.getInstance().setAcceptCookie(true)
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             resumeTimers()
             onResume()
         }
         activeWebView = webView
-
-        fun startSearchEnrichment() {
-            if (searchEnrichmentStarted || completion.isCompleted) return
-            searchEnrichmentStarted = true
-            coverageActive = true
-            flushPayloads()
-            publish(
-                "Categorías terminadas · ${products.size} productos · " +
-                    "completando huecos con el buscador…"
-            )
-            val rootLiteral = JSONObject.quote(store.url)
-            val script = buildString {
-                append("try{sessionStorage.setItem('__smartDealsCrawlerV10State',JSON.stringify({complete:true}));}catch(_){};")
-                append(searchEndpointHarvesterScript)
-                append('\n')
-                append(fastCoverageSearchScript)
-                append('\n')
-                append("window.__smartDealsEndpointMode=true;")
-                append("window.__smartDealsSetRoot&&window.__smartDealsSetRoot(")
-                append(rootLiteral)
-                append(");")
-                append("window.__smartDealsStartExplore&&window.__smartDealsStartExplore();")
-            }
-            runCatching { webView.evaluateJavascript(script, null) }
-                .onFailure {
-                    coverageActive = false
-                    scriptReportedComplete = true
-                    scheduleCompletion()
-                }
-        }
 
         WebViewCompat.addWebMessageListener(
             webView,
@@ -430,172 +323,76 @@ class PromotionScanService : Service() {
             if (host != "pedidosya.com.ar" && !host.endsWith(".pedidosya.com.ar")) {
                 return@addWebMessageListener
             }
-            lastActivityAt.set(System.currentTimeMillis())
+
             val raw = message.data ?: return@addWebMessageListener
             val envelope = runCatching { JSONObject(raw) }.getOrNull()
                 ?: return@addWebMessageListener
 
             when (envelope.optString("event")) {
-                "coverage_started" -> {
-                    coverageActive = true
-                    publish(
-                        "Complementando el catálogo por buscador · " +
-                            "${products.size} productos · ${verifiedCount()} promociones"
-                    )
-                }
-                "coverage_complete" -> {
-                    coverageActive = false
-                    scriptReportedComplete = true
-                    flushPayloads()
-                    publish("Categorías y buscador terminados; procesando las últimas promociones…")
-                    scheduleCompletion()
-                }
-                "explore_complete" -> {
-                    if (!searchEnrichmentStarted) {
-                        startSearchEnrichment()
-                    } else if (!coverageActive) {
-                        publish("Esperando el cierre del complemento de búsqueda…")
-                    }
-                }
-                "catalog_routes" -> {
-                    val pending = envelope.optInt("pending")
-                    val visited = envelope.optInt("visited")
-                    val added = envelope.optInt("added")
-                    publish(
-                        "Descubriendo pasillos: $visited recorridos · $pending pendientes" +
-                            if (added > 0) " · +$added nuevos" else ""
-                    )
-                }
-                "route_change" -> {
-                    val label = envelope.optString("label").ifBlank { "siguiente categoría" }
-                    val remaining = envelope.optInt("remaining")
-                    val visited = envelope.optInt("visited")
-                    publish("Abriendo $label · $visited recorridas · $remaining pendientes")
-                }
-                "catalog_response" -> {
-                    val captured = envelope.optInt("products")
-                    if (captured > 0) {
-                        publish(
-                            "Capturando catálogo por categorías · ${products.size} procesados · " +
-                                "+$captured recibidos"
-                        )
-                    }
-                }
                 "explore_progress" -> {
                     val phase = envelope.optString("phase")
-                    val pending = envelope.optInt("pending", -1)
-                    val visited = envelope.optInt("visited", -1)
-                    val routeProgress = if (pending >= 0 || visited >= 0) {
-                        " · ${visited.coerceAtLeast(0)} categorías · ${pending.coerceAtLeast(0)} pendientes"
-                    } else {
-                        ""
-                    }
                     publish(
                         if (phase.isNotBlank()) {
-                            "$phase$routeProgress · ${products.size} productos · ${verifiedCount()} promociones"
+                            "$phase · ${products.size} productos · ${verifiedCount()} promociones"
                         } else {
                             "${products.size} productos · ${verifiedCount()} promociones"
                         }
                     )
                 }
-                "explore_started", "catalog_reset" -> Unit
-                else -> queueEnvelope(envelope, raw.length)
+                "explore_complete" -> {
+                    searchReportedComplete.set(true)
+                    publish("Búsqueda terminada; procesando las últimas promociones…")
+                    watchForFinalPayloads()
+                }
+                "explore_started", "catalog_routes", "route_change" -> Unit
+                else -> {
+                    lastPayloadAt.set(System.currentTimeMillis())
+                    pendingPayloads.incrementAndGet()
+                    if (payloadQueue.trySend(raw).isFailure) {
+                        pendingPayloads.updateAndGet { value -> (value - 1).coerceAtLeast(0) }
+                    }
+                }
             }
         }
 
-        // Category routes are deliberately installed before any search script. Search harvesting is
-        // injected only after the crawler reports that every discovered route has been visited.
+        // Same search order as version 1.2.2. The promotion-card observer is the only later
+        // addition: it enriches badge evidence so the current parser distinguishes direct
+        // discounts from second-unit promotions without changing the search algorithm.
         WebViewCompat.addDocumentStartJavaScript(webView, exhaustiveCatalogScript, ALLOWED_ORIGINS)
-        WebViewCompat.addDocumentStartJavaScript(webView, catalogResponseCaptureScript, ALLOWED_ORIGINS)
         WebViewCompat.addDocumentStartJavaScript(webView, promotionCardCaptureScript, ALLOWED_ORIGINS)
+        WebViewCompat.addDocumentStartJavaScript(webView, searchEndpointHarvesterScript, ALLOWED_ORIGINS)
 
         webView.webViewClient = object : WebViewClient() {
-            override fun onPageFinished(view: WebView, url: String) {
-                lastActivityAt.set(System.currentTimeMillis())
-                publish(
-                    if (attempt == 1) {
-                        "Página cargada; descubriendo categorías y pasillos…"
-                    } else {
-                        "Motor web reiniciado; retomando las categorías pendientes…"
-                    }
-                )
+            override fun onPageFinished(view: WebView, finishedUrl: String) {
+                publish("Página cargada; iniciando la búsqueda de la versión 1.2.2…")
                 val rootLiteral = JSONObject.quote(store.url)
-                val initialization = buildString {
-                    append("window.__smartDealsEndpointMode=false;")
-                    append("window.__smartDealsSetRoot&&window.__smartDealsSetRoot(")
-                    append(rootLiteral)
-                    append(");")
-                    if (!crawlerInitialized && attempt == 1) {
-                        append("try{Object.keys(localStorage).filter(k=>k.indexOf('__smartDealsExhaustiveV19:')===0).forEach(k=>localStorage.removeItem(k));}catch(_){};")
-                        append("window.__smartDealsResetCatalogCrawler&&window.__smartDealsResetCatalogCrawler(")
-                        append(rootLiteral)
-                        append(");")
-                        crawlerInitialized = true
-                    }
-                }
-                view.evaluateJavascript(initialization, null)
+                view.evaluateJavascript(
+                    "window.__smartDealsEndpointMode = true; " +
+                        "window.__smartDealsSetRoot && window.__smartDealsSetRoot($rootLiteral);",
+                    null,
+                )
                 view.postDelayed({
                     runCatching {
                         view.evaluateJavascript(
-                            "window.__smartDealsSetRoot&&window.__smartDealsSetRoot($rootLiteral);" +
-                                "window.__smartDealsStartExplore&&window.__smartDealsStartExplore();",
+                            "window.__smartDealsSetRoot && window.__smartDealsSetRoot($rootLiteral); " +
+                                "window.__smartDealsStartExplore && window.__smartDealsStartExplore();",
                             null,
                         )
                     }
                 }, START_EXPLORATION_DELAY_MS)
             }
-
-            override fun onReceivedError(
-                view: WebView?,
-                request: WebResourceRequest?,
-                error: WebResourceError?,
-            ) {
-                if (request?.isForMainFrame == true && !completion.isCompleted) {
-                    publish("Error de carga; reintentando la categoría…")
-                    handler.postDelayed({ view?.reload() }, MAIN_FRAME_RETRY_MS)
-                }
-            }
         }
 
-        val stallMonitor = launch(Dispatchers.Main.immediate) {
-            while (isActive && !completion.isCompleted) {
-                delay(STALL_CHECK_INTERVAL_MS)
-                val idleFor = System.currentTimeMillis() - lastActivityAt.get()
-                if (idleFor < STALL_RELOAD_MS) continue
-
-                if (reloads < MAX_RELOADS_PER_ATTEMPT) {
-                    reloads += 1
-                    lastActivityAt.set(System.currentTimeMillis())
-                    publish(
-                        "La búsqueda quedó sin actividad; reactivando el motor web " +
-                            "sin perder ${products.size} productos…"
-                    )
-                    runCatching {
-                        webView.resumeTimers()
-                        webView.onResume()
-                        webView.reload()
-                    }
-                } else {
-                    completion.complete(AttemptOutcome.STALLED)
-                }
-            }
-        }
-
-        publish(if (attempt == 1) "Abriendo ${store.name}…" else "Retomando ${store.name}…")
+        publish("Abriendo ${store.name}…")
         webView.loadUrl(store.url)
 
-        val outcome = withTimeoutOrNull(ATTEMPT_TIMEOUT_MS) {
+        try {
             completion.await()
-        } ?: AttemptOutcome.TIMEOUT
-
-        stallMonitor.cancel()
-        handler.removeCallbacks(idleFlushRunnable)
-        handler.removeCallbacks(completionRunnable)
-        flushPayloads()
-        delay(FINAL_ATTEMPT_DRAIN_MS)
-        activeWebView = null
-        disposeWebView(webView)
-        outcome
+        } finally {
+            completionWatcher?.cancel()
+            activeWebView = null
+            disposeWebView(webView)
+        }
     }
 
     private fun publishStoreProgress(
@@ -604,7 +401,7 @@ class PromotionScanService : Service() {
         storeCount: Int,
         previousPromotions: Int,
         products: ConcurrentHashMap<String, CapturedProduct>,
-        pendingBatches: AtomicInteger,
+        pendingPayloads: AtomicInteger,
         status: String?,
     ) {
         val verified = products.values.count(::isVerifiedPromotion)
@@ -618,12 +415,12 @@ class PromotionScanService : Service() {
                     append(" productos · ")
                     append(verified)
                     append(" promociones")
-                    val pending = pendingBatches.get()
-                    if (pending > 0) append(" · $pending lotes pendientes")
+                    val pending = pendingPayloads.get()
+                    if (pending > 0) append(" · $pending respuestas pendientes")
                 },
                 productsFound = products.size,
                 promotionsFound = previousPromotions + verified,
-                pendingBatches = pendingBatches.get(),
+                pendingBatches = pendingPayloads.get(),
             )
         }
         updateProgressNotification()
@@ -631,7 +428,6 @@ class PromotionScanService : Service() {
 
     private fun disposeWebView(webView: WebView) {
         runCatching { webView.stopLoading() }
-        runCatching { webView.loadUrl("about:blank") }
         runCatching { webView.onPause() }
         runCatching { webView.removeAllViews() }
         runCatching { webView.destroy() }
@@ -757,12 +553,6 @@ class PromotionScanService : Service() {
         )
     }
 
-    private enum class AttemptOutcome {
-        COMPLETE,
-        STALLED,
-        TIMEOUT,
-    }
-
     private data class StoreScanResult(
         val products: List<CapturedProduct>,
         val completed: Boolean,
@@ -779,20 +569,8 @@ class PromotionScanService : Service() {
         private const val PROGRESS_NOTIFICATION_ID = 4101
         private const val COMPLETE_NOTIFICATION_ID = 4102
 
-        private const val MAX_BUFFERED_PAYLOADS = 18
-        private const val MAX_BUFFERED_PAYLOAD_CHARS = 600_000
-        private const val PAYLOAD_IDLE_FLUSH_MS = 250L
-        private const val COMPLETION_QUIET_MS = 4_000L
-        private const val START_EXPLORATION_DELAY_MS = 1_100L
-        private const val FINAL_ATTEMPT_DRAIN_MS = 700L
-        private const val FINAL_DRAIN_TIMEOUT_MS = 20_000L
-        private const val ATTEMPT_TIMEOUT_MS = 15 * 60 * 1_000L
-        private const val MAX_WEBVIEW_ATTEMPTS = 3
-        private const val MAX_RELOADS_PER_ATTEMPT = 2
-        private const val STALL_CHECK_INTERVAL_MS = 5_000L
-        private const val STALL_RELOAD_MS = 45_000L
-        private const val MAIN_FRAME_RETRY_MS = 1_500L
-        private const val RESTART_DELAY_MS = 900L
+        private const val START_EXPLORATION_DELAY_MS = 1_350L
+        private const val FINAL_PAYLOAD_QUIET_MS = 2_500L
         private const val WAKE_LOCK_TIMEOUT_MS = 60 * 60 * 1_000L
         private const val NOTIFICATION_THROTTLE_MS = 900L
 
