@@ -28,7 +28,6 @@ import com.lisofer.smartsupermarketdeals.web.exhaustiveCatalogScript
 import com.lisofer.smartsupermarketdeals.web.promotionCardCaptureScript
 import com.lisofer.smartsupermarketdeals.web.searchEndpointHarvesterScript
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
@@ -45,6 +44,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 
 internal fun shouldPersistIncompleteScan(
@@ -247,8 +247,9 @@ class PromotionScanService : Service() {
     }
 
     /**
-     * Exact version-1.2.2 search lifecycle inside a foreground service:
-     * one WebView, one start, no reload, no stall monitor, no replacement and no retry loop.
+     * Keeps the version-1.2.2 search lifecycle inside a foreground service: one WebView and one
+     * start, without reloads or replacement. The completion wrapper is deliberately redundant so
+     * a lost final bridge message cannot leave a finished search spinning forever.
      */
     private suspend fun runLegacyV122WebView(
         store: Store,
@@ -266,9 +267,10 @@ class PromotionScanService : Service() {
         check(!LegacyV122ScanContract.STRATEGIC_COVERAGE)
 
         val completion = CompletableDeferred<Boolean>()
-        val searchReportedComplete = AtomicBoolean(false)
+        val searchFinishedAt = AtomicLong(0L)
         val lastPayloadAt = AtomicLong(System.currentTimeMillis())
         var completionWatcher: Job? = null
+        var searchStateWatcher: Job? = null
 
         fun verifiedCount(): Int = products.values.count(::isVerifiedPromotion)
 
@@ -289,16 +291,25 @@ class PromotionScanService : Service() {
             completionWatcher = launch {
                 while (isActive && !completion.isCompleted) {
                     delay(100)
-                    val quietFor = System.currentTimeMillis() - lastPayloadAt.get()
+                    val now = System.currentTimeMillis()
                     if (
-                        searchReportedComplete.get() &&
-                        pendingPayloads.get() == 0 &&
-                        quietFor >= FINAL_PAYLOAD_QUIET_MS
+                        ScanCompletionPolicy.shouldFinish(
+                            searchFinishedAt = searchFinishedAt.get(),
+                            lastPayloadAt = lastPayloadAt.get(),
+                            pendingPayloads = pendingPayloads.get(),
+                            now = now,
+                        )
                     ) {
                         completion.complete(true)
                     }
                 }
             }
+        }
+
+        fun signalSearchFinished() {
+            searchFinishedAt.compareAndSet(0L, System.currentTimeMillis())
+            publish("Búsqueda terminada; procesando las últimas promociones…")
+            watchForFinalPayloads()
         }
 
         val webView = WebView(this@PromotionScanService).apply {
@@ -338,12 +349,16 @@ class PromotionScanService : Service() {
                             "${products.size} productos · ${verifiedCount()} promociones"
                         }
                     )
+                    if (
+                        ScanCompletionPolicy.isCompletionProgress(
+                            phase = phase,
+                            endpointHarvestComplete = envelope.optBoolean("endpointHarvestComplete"),
+                        )
+                    ) {
+                        signalSearchFinished()
+                    }
                 }
-                "explore_complete" -> {
-                    searchReportedComplete.set(true)
-                    publish("Búsqueda terminada; procesando las últimas promociones…")
-                    watchForFinalPayloads()
-                }
+                "explore_complete" -> signalSearchFinished()
                 "explore_started", "catalog_routes", "route_change" -> Unit
                 else -> {
                     lastPayloadAt.set(System.currentTimeMillis())
@@ -355,9 +370,8 @@ class PromotionScanService : Service() {
             }
         }
 
-        // Same search order as version 1.2.2. The promotion-card observer is the only later
-        // addition: it enriches badge evidence so the current parser distinguishes direct
-        // discounts from second-unit promotions without changing the search algorithm.
+        // Same search order and adaptive endpoint harvester as version 1.2.2. The badge observer
+        // only enriches commercial labels; it does not replace or restart the search engine.
         WebViewCompat.addDocumentStartJavaScript(webView, exhaustiveCatalogScript, ALLOWED_ORIGINS)
         WebViewCompat.addDocumentStartJavaScript(webView, promotionCardCaptureScript, ALLOWED_ORIGINS)
         WebViewCompat.addDocumentStartJavaScript(webView, searchEndpointHarvesterScript, ALLOWED_ORIGINS)
@@ -386,10 +400,32 @@ class PromotionScanService : Service() {
         publish("Abriendo ${store.name}…")
         webView.loadUrl(store.url)
 
+        searchStateWatcher = launch {
+            while (isActive && !completion.isCompleted) {
+                delay(SEARCH_STATE_POLL_MS)
+                runCatching {
+                    webView.evaluateJavascript(
+                        "Boolean(window.__smartDealsSearchFinished)",
+                    ) { value ->
+                        if (value == "true" && !completion.isCompleted) {
+                            signalSearchFinished()
+                        }
+                    }
+                }
+            }
+        }
+
         try {
-            completion.await()
+            val finished = withTimeoutOrNull(ScanCompletionPolicy.STORE_SCAN_TIMEOUT_MS) {
+                completion.await()
+            } ?: false
+            if (!finished) {
+                publish("Se alcanzó el límite de seguridad; guardando todo lo ya procesado…")
+            }
+            finished
         } finally {
             completionWatcher?.cancel()
+            searchStateWatcher?.cancel()
             activeWebView = null
             disposeWebView(webView)
         }
@@ -570,7 +606,7 @@ class PromotionScanService : Service() {
         private const val COMPLETE_NOTIFICATION_ID = 4102
 
         private const val START_EXPLORATION_DELAY_MS = 1_350L
-        private const val FINAL_PAYLOAD_QUIET_MS = 2_500L
+        private const val SEARCH_STATE_POLL_MS = 1_000L
         private const val WAKE_LOCK_TIMEOUT_MS = 60 * 60 * 1_000L
         private const val NOTIFICATION_THROTTLE_MS = 900L
 
