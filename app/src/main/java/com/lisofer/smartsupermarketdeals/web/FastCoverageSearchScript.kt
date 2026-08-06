@@ -26,25 +26,27 @@ private val fastCoverageTermsLiteral = fastCoverageSearchTerms
     .joinToString(prefix = "[", postfix = "]") { term -> "\"$term\"" }
 
 /**
- * Runs an exhaustive set of catalog searches. It starts with the broad empty query, then uses
- * letters and product families to recover items omitted by ranked search results. Every query is
- * paginated until PedidosYa reports exhaustion, returns a short/empty page or repeats a response.
+ * Uses an adaptive coverage strategy. The broad catalog is exhausted once, while secondary
+ * searches are paginated only while they keep revealing products not seen in earlier responses.
  */
 internal val fastCoverageSearchScript = """
 (() => {
-  if (window.__smartDealsFastCoverageV16) return;
-  window.__smartDealsFastCoverageV16 = true;
+  if (window.__smartDealsFastCoverageV17) return;
+  window.__smartDealsFastCoverageV17 = true;
 
   const SEARCH_TERMS = $fastCoverageTermsLiteral;
   const TEMPLATE_PREFIXES = [
     '__smartDealsEndpointTemplateV12:',
     '__smartDealsEndpointTemplateV11:'
   ];
-  const CONCURRENCY = 7;
-  const MAX_REQUESTS = 1500;
-  const MAX_PAGES_PER_QUERY = 40;
-  const TEMPLATE_WAIT_MS = 36000;
-  const FALLBACK_WAIT_MS = 780000;
+  const CONCURRENCY = 10;
+  const MAX_REQUESTS = 450;
+  const MAX_PRIMARY_PAGES = 80;
+  const MAX_SECONDARY_PAGES = 12;
+  const NOVELTY_STOP_PAGES = 2;
+  const TEMPLATE_WAIT_MS = 30000;
+  const FALLBACK_WAIT_MS = 240000;
+  const WATCHDOG_MS = 330000;
   const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
   const clean = value => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
   const fold = value => clean(value).toLowerCase().normalize('NFD')
@@ -100,6 +102,7 @@ internal val fastCoverageSearchScript = """
       event: 'coverage_complete',
       requests: requestCount,
       promotionSignals: globalPromotionCount,
+      catalogProducts: catalogSeen.size,
       fastCoverage: true,
     }, extra || {}));
   };
@@ -134,7 +137,7 @@ internal val fastCoverageSearchScript = """
     while (Date.now() < deadline) {
       const template = loadTemplate();
       if (template) return template;
-      await sleep(350);
+      await sleep(300);
     }
     return null;
   };
@@ -181,8 +184,8 @@ internal val fastCoverageSearchScript = """
 
     const configured = Number(descriptorValue(template, template.pagination && template.pagination.limit));
     const limit = Number.isFinite(configured) && configured > 0
-      ? Math.min(120, Math.max(100, configured))
-      : 120;
+      ? Math.min(120, Math.max(80, configured))
+      : 100;
     if (template.pagination && template.pagination.limit) {
       applyDescriptor(target, template.pagination.limit, limit);
     }
@@ -232,6 +235,8 @@ internal val fastCoverageSearchScript = """
     'barcode', 'gtin', 'ean', 'id'
   ];
   const IMAGE_KEYS = ['image', 'imageurl', 'image_url', 'picture', 'thumbnail', 'photo'];
+  const BRAND_KEYS = ['brand', 'brandname', 'brand_name', 'manufacturer'];
+  const SIZE_KEYS = ['presentation', 'size', 'pack', 'unit', 'variant'];
   const TOTAL_KEYS = [
     'totalcount', 'total_count', 'totalelements', 'total_elements', 'totalresults',
     'total_results', 'totalitems', 'total_items', 'resultcount', 'result_count'
@@ -290,7 +295,7 @@ internal val fastCoverageSearchScript = """
     const output = {};
     for (const key of Object.keys(value)) {
       const childPromo = insidePromo || promoKey(key);
-      const keep = /(?:^id${'$'}|sku|ean|gtin|barcode|product|item|name|title|brand|image|picture|thumbnail|url|href|description|presentation|size|pack|unit|price|pricing)/i.test(key) ||
+      const keep = /(?:^id|sku|ean|gtin|barcode|product|item|name|title|brand|image|picture|thumbnail|url|href|description|presentation|size|pack|unit|price|pricing)/i.test(key) ||
         promoKey(key) ||
         (childPromo && /(?:label|text|subtitle|caption|message|content|type|kind|scope|value|amount|percentage|percent|quantity|take|buy|pay|required|discounted)/i.test(key));
       if (keep) output[key] = compact(value[key], depth + 1, childPromo);
@@ -316,12 +321,19 @@ internal val fastCoverageSearchScript = """
     return snapshot;
   };
 
-  const productSignature = product => {
+  const catalogSignature = product => {
     const id = clean(directValue(product, ID_KEYS));
+    if (id) return 'id|' + id;
     const name = fold(directValue(product, NAME_KEYS));
+    const brand = fold(directValue(product, BRAND_KEYS));
+    const size = fold(directValue(product, SIZE_KEYS));
+    return 'name|' + name + '|' + brand + '|' + size;
+  };
+  const promotionSignature = product => {
+    const base = catalogSignature(product);
     const price = clean(nestedPrice(product));
     const image = clean(directValue(product, IMAGE_KEYS));
-    return (id || name) + '|' + price + '|' + image.slice(0, 100);
+    return base + '|' + price + '|' + image.slice(0, 100);
   };
   const hasPublishedOldPrice = (node, depth) => {
     if (!node || typeof node !== 'object' || depth > 8) return false;
@@ -350,10 +362,10 @@ internal val fastCoverageSearchScript = """
 
   const collect = root => {
     const promotional = [];
+    const catalogSignatures = new Set();
     const stack = [{ value: root, inherited: null, depth: 0 }];
     let visited = 0;
-    let totalProducts = 0;
-    while (stack.length > 0 && visited < 150000 && promotional.length < 12000) {
+    while (stack.length > 0 && visited < 150000 && catalogSignatures.size < 20000) {
       const entry = stack.pop();
       visited += 1;
       const value = entry && entry.value;
@@ -366,7 +378,8 @@ internal val fastCoverageSearchScript = """
       }
 
       if (looksLikeProduct(value)) {
-        totalProducts += 1;
+        const signature = catalogSignature(value);
+        if (signature && signature !== 'name|||') catalogSignatures.add(signature);
         const product = compact(value, 0, false) || {};
         const text = JSON.stringify(product).slice(0, 20000);
         const ownPromotion = promotionSignal.test(fold(text)) ||
@@ -375,7 +388,7 @@ internal val fastCoverageSearchScript = """
           product.__smartDealsSectionPromotion = entry.inherited;
         }
         if (ownPromotion || entry.inherited) {
-          product.source = 'fast-coverage-v16';
+          product.source = 'adaptive-coverage-v17';
           promotional.push(product);
         }
       }
@@ -390,7 +403,7 @@ internal val fastCoverageSearchScript = """
         stack.push({ value: child, inherited, depth: entry.depth + 1 });
       }
     }
-    return { promotional, totalProducts };
+    return { promotional, catalogSignatures: Array.from(catalogSignatures) };
   };
 
   const metadata = root => {
@@ -424,23 +437,25 @@ internal val fastCoverageSearchScript = """
   };
 
   const responseFingerprints = new Set();
-  const globalBest = new Map();
+  const catalogSeen = new Set();
+  const promotionBest = new Map();
   let globalPromotionCount = 0;
+
   const emitProducts = (url, products) => {
     const fresh = [];
     for (const product of products || []) {
-      const signature = productSignature(product);
-      if (!signature || signature === '||') continue;
+      const signature = promotionSignature(product);
+      if (!signature || signature === 'name||||') continue;
       const quality = productQuality(product);
-      const previous = globalBest.get(signature);
+      const previous = promotionBest.get(signature);
       if (previous != null && previous >= quality) continue;
-      globalBest.set(signature, quality);
+      promotionBest.set(signature, quality);
       if (previous == null) globalPromotionCount += 1;
       fresh.push(product);
     }
     for (let index = 0; index < fresh.length; index += 45) {
       post({
-        url: url + '#fast-coverage-' + index,
+        url: url + '#adaptive-coverage-' + index,
         body: JSON.stringify({ products: fresh.slice(index, index + 45) }),
       });
     }
@@ -478,7 +493,8 @@ internal val fastCoverageSearchScript = """
         return {
           query,
           pageIndex,
-          totalProducts: 0,
+          catalogProducts: 0,
+          newCatalogProducts: 0,
           freshPromotions: 0,
           total: null,
           hasNext: false,
@@ -491,12 +507,20 @@ internal val fastCoverageSearchScript = """
       const root = JSON.parse(text);
       const collected = collect(root);
       const pageMetadata = metadata(root);
+      let newCatalogProducts = 0;
+      for (const signature of collected.catalogSignatures) {
+        if (!catalogSeen.has(signature)) {
+          catalogSeen.add(signature);
+          newCatalogProducts += 1;
+        }
+      }
       const freshPromotions = emitProducts(built.url, collected.promotional);
       successfulResponses += 1;
       return {
         query,
         pageIndex,
-        totalProducts: collected.totalProducts,
+        catalogProducts: collected.catalogSignatures.length,
+        newCatalogProducts,
         freshPromotions,
         total: pageMetadata.total,
         hasNext: pageMetadata.hasNext,
@@ -519,6 +543,7 @@ internal val fastCoverageSearchScript = """
         requests: requestCount,
         completed: Math.min(items.length, index + batch.length),
         totalQueries: items.length,
+        catalogProducts: catalogSeen.size,
         promotionSignals: globalPromotionCount,
       });
       await sleep(20);
@@ -531,52 +556,113 @@ internal val fastCoverageSearchScript = """
       (template.pagination.page || template.pagination.offset || template.pagination.cursor)
   );
 
-  const exhaustPages = async (template, seeds, observedMaximum, label) => {
-    const minimumFull = Math.max(8, Math.floor(observedMaximum * 0.65));
-    const cumulativeByQuery = new Map();
+  const explicitMore = (result, cumulative) => result && (
+    result.hasNext === true ||
+    result.nextCursor != null ||
+    (result.total != null && cumulative < result.total)
+  );
+
+  const pageLooksFull = (result, baseline) => {
+    if (!result || result.catalogProducts <= 0) return false;
+    const threshold = Math.max(6, Math.floor(Math.max(1, baseline) * 0.65));
+    return result.catalogProducts >= threshold;
+  };
+
+  const shouldContinue = (result, cumulative, baseline, previousCursor) => {
+    if (!result || result.duplicate || result.catalogProducts <= 0) return false;
+    if (result.hasNext === false) return false;
+    if (result.total != null && cumulative >= result.total) return false;
+    if (result.nextCursor != null && previousCursor != null && result.nextCursor === previousCursor) {
+      return false;
+    }
+    return explicitMore(result, cumulative) || pageLooksFull(result, baseline);
+  };
+
+  const exhaustPrimary = async (template, first) => {
+    if (!first || !hasPagination(template)) return;
+    let current = first;
+    let cumulative = first.catalogProducts;
+    const baseline = Math.max(1, first.catalogProducts);
+    let previousCursor = null;
+
+    while (
+      current.pageIndex + 1 < MAX_PRIMARY_PAGES &&
+      requestCount < MAX_REQUESTS &&
+      shouldContinue(current, cumulative, baseline, previousCursor)
+    ) {
+      previousCursor = current.nextCursor;
+      const next = await fetchQuery(
+        template,
+        current.query,
+        current.pageIndex + 1,
+        current.nextCursor,
+      );
+      if (!next) break;
+      current = next;
+      cumulative += next.catalogProducts;
+      progress('Completando el catálogo general…', {
+        requests: requestCount,
+        catalogProducts: catalogSeen.size,
+        promotionSignals: globalPromotionCount,
+      });
+    }
+  };
+
+  const exhaustSecondary = async (template, seeds) => {
+    if (!hasPagination(template)) return;
     let activePages = [];
 
     for (const seed of seeds || []) {
-      if (!seed || seed.duplicate || seed.totalProducts <= 0) continue;
-      cumulativeByQuery.set(seed.query, seed.totalProducts);
-      const explicitlyMore = seed.hasNext === true ||
-        seed.nextCursor != null ||
-        (seed.total != null && seed.totalProducts < seed.total);
-      const appearsFull = seed.totalProducts >= minimumFull;
-      if (explicitlyMore || appearsFull) activePages.push(seed);
+      if (!seed || seed.duplicate || seed.catalogProducts <= 0) continue;
+      const state = {
+        result: seed,
+        baseline: Math.max(1, seed.catalogProducts),
+        cumulative: seed.catalogProducts,
+        noNovelty: seed.newCatalogProducts === 0 ? 1 : 0,
+        previousCursor: null,
+      };
+      if (
+        state.noNovelty < NOVELTY_STOP_PAGES &&
+        shouldContinue(seed, state.cumulative, state.baseline, null)
+      ) {
+        activePages.push(state);
+      }
     }
 
     while (activePages.length > 0 && requestCount < MAX_REQUESTS) {
       const inputs = activePages
-        .filter(result => result.pageIndex + 1 < MAX_PAGES_PER_QUERY)
-        .map(result => ({
-          query: result.query,
-          pageIndex: result.pageIndex + 1,
-          cursor: result.nextCursor,
-          previousCursor: result.nextCursor,
+        .filter(state => state.result.pageIndex + 1 < MAX_SECONDARY_PAGES)
+        .map(state => ({
+          state,
+          query: state.result.query,
+          pageIndex: state.result.pageIndex + 1,
+          cursor: state.result.nextCursor,
         }));
       if (inputs.length === 0) break;
 
       const pages = await runInBatches(
         inputs,
-        input => fetchQuery(template, input.query, input.pageIndex, input.cursor),
-        label,
+        input => fetchQuery(template, input.query, input.pageIndex, input.cursor)
+          .then(result => ({ input, result })),
+        'Verificando únicamente búsquedas que todavía aportan productos…',
       );
       activePages = [];
 
-      for (const page of pages) {
-        if (!page || page.duplicate || page.totalProducts <= 0) continue;
-        const cumulative = (cumulativeByQuery.get(page.query) || 0) + page.totalProducts;
-        cumulativeByQuery.set(page.query, cumulative);
+      for (const pair of pages) {
+        if (!pair || !pair.result) continue;
+        const state = pair.input.state;
+        const page = pair.result;
+        state.previousCursor = state.result.nextCursor;
+        state.result = page;
+        state.cumulative += page.catalogProducts;
+        state.noNovelty = page.newCatalogProducts === 0 ? state.noNovelty + 1 : 0;
 
-        const explicitHasMore = page.hasNext === true ||
-          page.nextCursor != null ||
-          (page.total != null && cumulative < page.total);
-        const appearsFull = page.totalProducts >= minimumFull;
-        const cursorAdvanced = page.nextCursor == null ||
-          !inputs.some(input => input.query === page.query && input.previousCursor === page.nextCursor);
-
-        if ((explicitHasMore || appearsFull) && cursorAdvanced) activePages.push(page);
+        if (
+          state.noNovelty < NOVELTY_STOP_PAGES &&
+          shouldContinue(page, state.cumulative, state.baseline, state.previousCursor)
+        ) {
+          activePages.push(state);
+        }
       }
     }
   };
@@ -585,52 +671,31 @@ internal val fastCoverageSearchScript = """
     requestCount = 0;
     successfulResponses = 0;
     responseFingerprints.clear();
-    globalBest.clear();
+    catalogSeen.clear();
+    promotionBest.clear();
     globalPromotionCount = 0;
 
     const terms = Array.from(new Set(SEARCH_TERMS));
-    const primaryTerm = terms.includes('') ? '' : terms[0];
-    const primaryPages = await runInBatches(
-      [primaryTerm],
-      term => fetchQuery(template, term, 0, null),
-      'Revisando el catálogo general…',
-    );
-    if (successfulResponses === 0) return false;
-
-    if (hasPagination(template) && primaryPages.length > 0) {
-      const primaryMaximum = primaryPages.reduce(
-        (maximum, result) => Math.max(maximum, result.totalProducts || 0),
-        0,
-      );
-      await exhaustPages(
-        template,
-        primaryPages,
-        primaryMaximum,
-        'Agotando todas las páginas del catálogo general…',
-      );
+    let primaryTerm = '';
+    progress('Leyendo el catálogo general…');
+    let primary = await fetchQuery(template, primaryTerm, 0, null);
+    if (!primary || primary.catalogProducts < 2) {
+      primaryTerm = clean(template.query && template.query.sample);
+      if (!primaryTerm) return false;
+      primary = await fetchQuery(template, primaryTerm, 0, null);
     }
+    if (!primary || primary.catalogProducts < 2 || successfulResponses === 0) return false;
+    await exhaustPrimary(template, primary);
 
     const secondaryTerms = terms.filter(term => term !== primaryTerm);
     const firstPages = await runInBatches(
       secondaryTerms,
       term => fetchQuery(template, term, 0, null),
-      'Buscando productos omitidos por letras y rubros…',
+      'Comprobando huecos con letras y rubros…',
     );
+    await exhaustSecondary(template, firstPages);
 
-    if (hasPagination(template) && firstPages.length > 0 && requestCount < MAX_REQUESTS) {
-      const observedMaximum = firstPages.reduce(
-        (maximum, result) => Math.max(maximum, result.totalProducts || 0),
-        0,
-      );
-      await exhaustPages(
-        template,
-        firstPages,
-        observedMaximum,
-        'Agotando las páginas restantes con promociones…',
-      );
-    }
-
-    await sleep(1100);
+    await sleep(700);
     return true;
   };
 
@@ -649,15 +714,15 @@ internal val fastCoverageSearchScript = """
     active = true;
     finished = false;
     post({ event: 'coverage_started', fastCoverage: true });
-    watchdog = setTimeout(() => finish({ watchdog: true }), 840000);
+    watchdog = setTimeout(() => finish({ watchdog: true }), WATCHDOG_MS);
 
     try {
       let template = loadTemplate();
       if (template) {
-        progress('Usando la consulta interna guardada para una búsqueda exhaustiva…');
+        progress('Usando la consulta interna guardada…');
         const worked = await runCoverage(template);
         if (worked) {
-          finish({ endpointCoverage: true });
+          finish({ endpointCoverage: true, adaptive: true });
           return;
         }
         removeTemplates();
@@ -671,7 +736,7 @@ internal val fastCoverageSearchScript = """
       if (template) {
         const worked = await runCoverage(template);
         if (worked) {
-          finish({ endpointCoverage: true, learnedNow: true });
+          finish({ endpointCoverage: true, learnedNow: true, adaptive: true });
           return;
         }
       }

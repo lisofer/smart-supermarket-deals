@@ -17,14 +17,17 @@ class FastCoverageSearchScriptTest {
     }
 
     @Test
-    fun scriptCoordinatesCompletionAndExhaustivePagination() {
+    fun scriptUsesAdaptiveNoveltyPagination() {
         assertTrue(fastCoverageSearchScript.contains("coverage_started"))
         assertTrue(fastCoverageSearchScript.contains("coverage_complete"))
-        assertTrue(fastCoverageSearchScript.contains("const CONCURRENCY = 7"))
-        assertTrue(fastCoverageSearchScript.contains("MAX_PAGES_PER_QUERY"))
-        assertTrue(fastCoverageSearchScript.contains("const exhaustPages"))
-        assertTrue(fastCoverageSearchScript.contains("Agotando todas las páginas"))
-        assertTrue(fastCoverageSearchScript.contains("fast-coverage-v16"))
-        assertFalse(fastCoverageSearchScript.contains("SECOND_PAGE_LIMIT"))
+        assertTrue(fastCoverageSearchScript.contains("const CONCURRENCY = 10"))
+        assertTrue(fastCoverageSearchScript.contains("const MAX_REQUESTS = 450"))
+        assertTrue(fastCoverageSearchScript.contains("const NOVELTY_STOP_PAGES = 2"))
+        assertTrue(fastCoverageSearchScript.contains("newCatalogProducts"))
+        assertTrue(fastCoverageSearchScript.contains("const exhaustPrimary"))
+        assertTrue(fastCoverageSearchScript.contains("const exhaustSecondary"))
+        assertTrue(fastCoverageSearchScript.contains("adaptive-coverage-v17"))
+        assertFalse(fastCoverageSearchScript.contains("const MAX_REQUESTS = 1500"))
+        assertFalse(fastCoverageSearchScript.contains("MAX_PAGES_PER_QUERY"))
     }
 }
