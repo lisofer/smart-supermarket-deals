@@ -75,13 +75,16 @@ internal const val exhaustiveCatalogScript = """
   };
 
   // SearchEndpointHarvesterScript sets this flag after finishing its adaptive empty-query/prefix
-  // traversal. Translate that completion into the event expected by the background service.
+  // traversal. Relay it with the same completion event understood by PromotionScanService. The
+  // previous `coverage_complete` name was treated as a payload and could leave the UI spinning
+  // with zero pending batches when the endpoint's own final message was lost.
   setInterval(() => {
     if (completionReported || !window.__smartDealsSearchFinished) return;
     completionReported = true;
     post({
-      event: 'coverage_complete',
+      event: 'explore_complete',
       endpointCoverage: true,
+      coverageComplete: true,
       v122BackgroundEngine: true,
     });
   }, 250);
