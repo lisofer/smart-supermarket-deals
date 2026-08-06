@@ -7,9 +7,9 @@ import org.junit.Test
 
 class FastCoverageSearchScriptTest {
     @Test
-    fun searchPlanIsDeepStrategicAndUnique() {
+    fun searchPlanCoversEveryTwoLetterPrefixAndImportantBrands() {
         assertEquals(fastCoverageSearchTerms.size, fastCoverageSearchTerms.distinct().size)
-        assertTrue(fastCoverageSearchTerms.size in 330..430)
+        assertTrue(fastCoverageSearchTerms.size in 850..1050)
         assertTrue(
             fastCoverageSearchTerms.containsAll(
                 listOf("", "agua", "leche", "arroz", "carne", "detergente", "pañal")
@@ -17,29 +17,36 @@ class FastCoverageSearchScriptTest {
         )
         assertTrue(
             fastCoverageSearchTerms.containsAll(
-                listOf("coca cola", "la serenisima", "arcor", "skip", "pampers")
+                listOf("milka", "chocolate", "coca cola", "la serenisima", "skip", "pampers")
             )
         )
-        assertTrue(fastCoverageSearchTerms.containsAll(listOf("ca", "ma", "pa", "te", "ch")))
+        val alphabet = "abcdefghijklmnopqrstuvwxyz"
+        assertTrue(
+            alphabet.all { first ->
+                alphabet.all { second ->
+                    fastCoverageSearchTerms.contains("$first$second")
+                }
+            }
+        )
         assertTrue(('a'..'z').all { fastCoverageSearchTerms.contains(it.toString()) })
         assertTrue(('0'..'9').all { fastCoverageSearchTerms.contains(it.toString()) })
     }
 
     @Test
-    fun scriptUsesHighCoverageAdaptivePagination() {
+    fun scriptExhaustsEachQueryAndSendsEveryProduct() {
         assertTrue(fastCoverageSearchScript.contains("coverage_started"))
         assertTrue(fastCoverageSearchScript.contains("coverage_complete"))
-        assertTrue(fastCoverageSearchScript.contains("const CONCURRENCY = 12"))
-        assertTrue(fastCoverageSearchScript.contains("const MAX_REQUESTS = 800"))
-        assertTrue(fastCoverageSearchScript.contains("const MAX_PRIMARY_PAGES = 100"))
-        assertTrue(fastCoverageSearchScript.contains("const MAX_SECONDARY_PAGES = 16"))
-        assertTrue(fastCoverageSearchScript.contains("const NOVELTY_STOP_PAGES = 2"))
-        assertTrue(fastCoverageSearchScript.contains("newCatalogProducts"))
-        assertTrue(fastCoverageSearchScript.contains("const exhaustPrimary"))
-        assertTrue(fastCoverageSearchScript.contains("const exhaustSecondary"))
-        assertTrue(fastCoverageSearchScript.contains("strategic-coverage-v18"))
-        assertTrue(fastCoverageSearchScript.contains("strategicQueries: SEARCH_TERMS.length"))
-        assertFalse(fastCoverageSearchScript.contains("const MAX_REQUESTS = 1500"))
-        assertFalse(fastCoverageSearchScript.contains("MAX_PAGES_PER_QUERY"))
+        assertTrue(fastCoverageSearchScript.contains("const CONCURRENCY = 18"))
+        assertTrue(fastCoverageSearchScript.contains("const MAX_REQUESTS = 4500"))
+        assertTrue(fastCoverageSearchScript.contains("const MAX_PRIMARY_PAGES = 180"))
+        assertTrue(fastCoverageSearchScript.contains("const MAX_PAGES_PER_QUERY = 60"))
+        assertTrue(fastCoverageSearchScript.contains("const exhaustQuery"))
+        assertTrue(fastCoverageSearchScript.contains("emitAllProducts"))
+        assertTrue(fastCoverageSearchScript.contains("exhaustive-products-v19"))
+        assertTrue(fastCoverageSearchScript.contains("completedTerms"))
+        assertTrue(fastCoverageSearchScript.contains("allQueriesCompleted: true"))
+        assertFalse(fastCoverageSearchScript.contains("NOVELTY_STOP_PAGES"))
+        assertFalse(fastCoverageSearchScript.contains("newCatalogProducts"))
+        assertFalse(fastCoverageSearchScript.contains("strategic-coverage-v18"))
     }
 }
